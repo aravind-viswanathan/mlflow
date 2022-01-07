@@ -1,6 +1,8 @@
 package org.mlflow.tracking.modelregistry;
 
+import com.google.common.base.Strings;
 import org.mlflow.api.proto.ModelRegistry;
+import org.mlflow.tracking.EmptyPage;
 import org.mlflow.tracking.MlflowClient;
 import org.mlflow.tracking.Page;
 
@@ -17,7 +19,12 @@ public class ModelVersionsPage implements Page<ModelRegistry.ModelVersion> {
     private final int maxResults;
     private final MlflowClient client;
 
-    public ModelVersionsPage(String token, List<ModelRegistry.ModelVersion> modelVersions, String searchFilter, List<String> orderBy, int maxResults, MlflowClient client) {
+    public ModelVersionsPage(String token,
+                             List<ModelRegistry.ModelVersion> modelVersions,
+                             String searchFilter,
+                             List<String> orderBy,
+                             int maxResults,
+                             MlflowClient client) {
         this.token = token;
         this.modelVersions = modelVersions;
         this.searchFilter = searchFilter;
@@ -29,26 +36,37 @@ public class ModelVersionsPage implements Page<ModelRegistry.ModelVersion> {
 
     @Override
     public int getPageSize() {
-        return 0;
+        return modelVersions.size();
     }
 
     @Override
     public boolean hasNextPage() {
-        return false;
+        return Strings.isNullOrEmpty(token);
     }
 
     @Override
     public Optional<String> getNextPageToken() {
+        if (hasNextPage()){
+            return Optional.of(token);
+        }
         return Optional.empty();
     }
 
     @Override
     public Page<ModelRegistry.ModelVersion> getNextPage() {
-        return null;
+        if (this.hasNextPage()) {
+            return this.client.searchModelVersions(
+                    this.searchFilter,
+                    this.maxResults,
+                    this.orderBy,
+                    this.token);
+        } else {
+            return new EmptyPage();
+        }
     }
 
     @Override
     public Iterable<ModelRegistry.ModelVersion> getItems() {
-        return null;
+        return modelVersions;
     }
 }
