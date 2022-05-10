@@ -27,23 +27,23 @@ from mlflow.utils.file_utils import TempDir
 from mlflow.utils.model_utils import _get_flavor_configuration
 from mlflow.tracking._model_registry import DEFAULT_AWAIT_MAX_SLEEP_SECONDS
 
-from tests.helper_functions import set_boto_credentials  # pylint: disable=unused-import
 from tests.helper_functions import mock_s3_bucket  # pylint: disable=unused-import
 from tests.helper_functions import (
     pyfunc_serve_and_score_model,
     _compare_conda_env_requirements,
     _assert_pip_requirements,
     _is_available_on_pypi,
+    _compare_logged_code_paths,
 )
 
 EXTRA_PYFUNC_SERVING_TEST_ARGS = (
-    [] if _is_available_on_pypi("scikit-learn", module="sklearn") else ["--no-conda"]
+    [] if _is_available_on_pypi("scikit-learn", module="sklearn") else ["--env-manager", "local"]
 )
 
 ModelWithData = namedtuple("ModelWithData", ["model", "inference_data"])
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="module")
 def sklearn_knn_model():
     iris = datasets.load_iris()
     X = iris.data[:, :2]  # we only take the first two features.
@@ -53,7 +53,7 @@ def sklearn_knn_model():
     return ModelWithData(model=knn_model, inference_data=X)
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="module")
 def sklearn_logreg_model():
     iris = datasets.load_iris()
     X = iris.data[:, :2]  # we only take the first two features.
@@ -63,10 +63,9 @@ def sklearn_logreg_model():
     return ModelWithData(model=linear_lr, inference_data=X)
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="module")
 def sklearn_custom_transformer_model(sklearn_knn_model):
     def transform(vec):
-        print("Invoking custom transformer!")
         return vec + 1
 
     transformer = SKFunctionTransformer(transform, validate=True)
@@ -92,7 +91,7 @@ def test_model_save_load(sklearn_knn_model, model_path):
 
     mlflow.sklearn.save_model(sk_model=knn_model, path=model_path)
     reloaded_knn_model = mlflow.sklearn.load_model(model_uri=model_path)
-    reloaded_knn_pyfunc = pyfunc.load_pyfunc(model_uri=model_path)
+    reloaded_knn_pyfunc = pyfunc.load_model(model_uri=model_path)
 
     np.testing.assert_array_equal(
         knn_model.predict(sklearn_knn_model.inference_data),
@@ -103,6 +102,19 @@ def test_model_save_load(sklearn_knn_model, model_path):
         reloaded_knn_model.predict(sklearn_knn_model.inference_data),
         reloaded_knn_pyfunc.predict(sklearn_knn_model.inference_data),
     )
+
+
+@pytest.mark.large
+def test_model_save_behavior_with_preexisting_folders(sklearn_knn_model, tmp_path):
+    sklearn_model_path = tmp_path / "sklearn_model_empty_exists"
+    sklearn_model_path.mkdir()
+    mlflow.sklearn.save_model(sk_model=sklearn_knn_model, path=sklearn_model_path)
+
+    sklearn_model_path = tmp_path / "sklearn_model_filled_exists"
+    sklearn_model_path.mkdir()
+    (sklearn_model_path / "foo.txt").write_text("dummy content")
+    with pytest.raises(MlflowException, match="already exists and is not empty"):
+        mlflow.sklearn.save_model(sk_model=sklearn_knn_model, path=sklearn_model_path)
 
 
 @pytest.mark.large
@@ -147,11 +159,9 @@ def test_model_load_from_remote_uri_succeeds(sklearn_knn_model, model_path, mock
 
 @pytest.mark.large
 def test_model_log(sklearn_logreg_model, model_path):
-    old_uri = mlflow.get_tracking_uri()
     with TempDir(chdr=True, remove_on_exit=True) as tmp:
         for should_start_run in [False, True]:
             try:
-                mlflow.set_tracking_uri("test")
                 if should_start_run:
                     mlflow.start_run()
 
@@ -159,7 +169,7 @@ def test_model_log(sklearn_logreg_model, model_path):
                 conda_env = os.path.join(tmp.path(), "conda_env.yaml")
                 _mlflow_conda_env(conda_env, additional_pip_deps=["scikit-learn"])
 
-                mlflow.sklearn.log_model(
+                model_info = mlflow.sklearn.log_model(
                     sk_model=sklearn_logreg_model.model,
                     artifact_path=artifact_path,
                     conda_env=conda_env,
@@ -167,6 +177,7 @@ def test_model_log(sklearn_logreg_model, model_path):
                 model_uri = "runs:/{run_id}/{artifact_path}".format(
                     run_id=mlflow.active_run().info.run_id, artifact_path=artifact_path
                 )
+                assert model_info.model_uri == model_uri
 
                 reloaded_logsklearn_knn_model = mlflow.sklearn.load_model(model_uri=model_uri)
                 np.testing.assert_array_equal(
@@ -183,7 +194,6 @@ def test_model_log(sklearn_logreg_model, model_path):
 
             finally:
                 mlflow.end_run()
-                mlflow.set_tracking_uri(old_uri)
 
 
 def test_log_model_calls_register_model(sklearn_logreg_model):
@@ -518,7 +528,7 @@ def test_model_save_with_cloudpickle_format_adds_cloudpickle_to_conda_environmen
         if type(dependency) == dict and "pip" in dependency
     ]
     assert len(pip_deps) == 1
-    assert any(["cloudpickle" in pip_dep for pip_dep in pip_deps[0]["pip"]])
+    assert any("cloudpickle" in pip_dep for pip_dep in pip_deps[0]["pip"])
 
 
 @pytest.mark.large
@@ -549,10 +559,7 @@ def test_model_save_without_cloudpickle_format_does_not_add_cloudpickle_to_conda
         with open(saved_conda_env_path, "r") as f:
             saved_conda_env_parsed = yaml.safe_load(f)
         assert all(
-            [
-                "cloudpickle" not in dependency
-                for dependency in saved_conda_env_parsed["dependencies"]
-            ]
+            "cloudpickle" not in dependency for dependency in saved_conda_env_parsed["dependencies"]
         )
 
 
@@ -580,7 +587,7 @@ def test_load_pyfunc_succeeds_for_older_models_with_pyfunc_data_field(
     assert pyfunc_conf is not None
     pyfunc_conf[pyfunc.DATA] = sklearn_conf["pickled_model"]
 
-    reloaded_knn_pyfunc = pyfunc.load_pyfunc(model_uri=model_path)
+    reloaded_knn_pyfunc = pyfunc.load_model(model_uri=model_path)
 
     np.testing.assert_array_equal(
         sklearn_knn_model.model.predict(sklearn_knn_model.inference_data),
@@ -618,5 +625,17 @@ def test_pyfunc_serve_and_score(sklearn_knn_model):
         content_type=pyfunc_scoring_server.CONTENT_TYPE_JSON_SPLIT_ORIENTED,
         extra_args=EXTRA_PYFUNC_SERVING_TEST_ARGS,
     )
-    scores = pd.read_json(resp.content, orient="records").values.squeeze()
+    scores = pd.read_json(resp.content.decode("utf-8"), orient="records").values.squeeze()
     np.testing.assert_array_almost_equal(scores, model.predict(inference_dataframe))
+
+
+def test_log_model_with_code_paths(sklearn_knn_model):
+    artifact_path = "model"
+    with mlflow.start_run(), mock.patch(
+        "mlflow.sklearn._add_code_from_conf_to_system_path"
+    ) as add_mock:
+        mlflow.sklearn.log_model(sklearn_knn_model.model, artifact_path, code_paths=[__file__])
+        model_uri = mlflow.get_artifact_uri(artifact_path)
+        _compare_logged_code_paths(__file__, model_uri, mlflow.sklearn.FLAVOR_NAME)
+        mlflow.sklearn.load_model(model_uri=model_uri)
+        add_mock.assert_called()

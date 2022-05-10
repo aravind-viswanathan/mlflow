@@ -1,7 +1,7 @@
 from packaging.version import Version
 import os
-import warnings
 import yaml
+from unittest import mock
 
 import mxnet as mx
 import numpy as np
@@ -29,6 +29,7 @@ from tests.helper_functions import (
     _compare_conda_env_requirements,
     _assert_pip_requirements,
     _is_available_on_pypi,
+    _compare_logged_code_paths,
 )
 
 if Version(mx.__version__) >= Version("2.0.0"):
@@ -37,7 +38,9 @@ else:
     array_module = mx.nd
 
 
-EXTRA_PYFUNC_SERVING_TEST_ARGS = [] if _is_available_on_pypi("mxnet") else ["--no-conda"]
+EXTRA_PYFUNC_SERVING_TEST_ARGS = (
+    [] if _is_available_on_pypi("mxnet") else ["--env-manager", "local"]
+)
 
 
 @pytest.fixture
@@ -77,9 +80,9 @@ def gluon_model(model_data):
     )
 
     est = get_estimator(model, trainer)
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        est.fit(train_data_loader, epochs=3)
+
+    est.fit(train_data_loader, epochs=3)
+
     return model
 
 
@@ -133,10 +136,11 @@ def test_model_log_load(gluon_model, model_data, model_path):
 
     artifact_path = "model"
     with mlflow.start_run():
-        mlflow.gluon.log_model(gluon_model, artifact_path=artifact_path)
+        model_info = mlflow.gluon.log_model(gluon_model, artifact_path=artifact_path)
         model_uri = "runs:/{run_id}/{artifact_path}".format(
             run_id=mlflow.active_run().info.run_id, artifact_path=artifact_path
         )
+        assert model_info.model_uri == model_uri
 
     # Loading Gluon model
     model_loaded = mlflow.gluon.load_model(model_uri, ctx.cpu())
@@ -308,7 +312,19 @@ def test_gluon_model_serving_and_scoring_as_pyfunc(gluon_model, model_data):
         content_type=pyfunc_scoring_server.CONTENT_TYPE_JSON_SPLIT_ORIENTED,
         extra_args=EXTRA_PYFUNC_SERVING_TEST_ARGS,
     )
-    response_values = pd.read_json(scoring_response.content, orient="records").values.astype(
-        np.float32
-    )
+    response_values = pd.read_json(
+        scoring_response.content.decode("utf-8"), orient="records"
+    ).values.astype(np.float32)
     assert all(np.argmax(response_values, axis=1) == expected.asnumpy())
+
+
+def test_log_model_with_code_paths(gluon_model):
+    artifact_path = "model"
+    with mlflow.start_run(), mock.patch(
+        "mlflow.gluon._add_code_from_conf_to_system_path"
+    ) as add_mock:
+        mlflow.gluon.log_model(gluon_model, artifact_path, code_paths=[__file__])
+        model_uri = mlflow.get_artifact_uri(artifact_path)
+        _compare_logged_code_paths(__file__, model_uri, mlflow.gluon.FLAVOR_NAME)
+        mlflow.gluon.load_model(model_uri, ctx.cpu())
+        add_mock.assert_called()

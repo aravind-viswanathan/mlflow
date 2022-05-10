@@ -31,6 +31,7 @@ from mlflow.sklearn.utils import (
     _get_arg_names,
     _log_child_runs_info,
 )
+from mlflow.tracking.client import MlflowClient
 from mlflow.utils import _truncate_dict
 from mlflow.utils.mlflow_tags import MLFLOW_AUTOLOGGING
 from mlflow.utils.validation import (
@@ -1193,6 +1194,63 @@ def test_eval_and_log_metrics_for_binary_classifier():
     assert sorted(artifacts) == sorted(eval_artifacts)
 
 
+def test_eval_and_log_metrics_for_binary_classifier_with_pos_label():
+    # disable autologging so that we can check for the sole existence of eval-time metrics
+    mlflow.sklearn.autolog(disable=True)
+
+    import sklearn.ensemble
+
+    model = sklearn.ensemble.RandomForestClassifier(max_depth=2, random_state=0, n_estimators=10)
+    X, y = sklearn.datasets.load_breast_cancer(return_X_y=True)
+    X_eval = X[:-1, :]
+    y_eval = y[:-1]
+
+    with mlflow.start_run() as run:
+        model = fit_model(model, X, y, "fit")
+        eval_metrics = mlflow.sklearn.eval_and_log_metrics(
+            model=model, X=X_eval, y_true=y_eval, prefix="val_", pos_label=1
+        )
+
+    y_pred = model.predict(X_eval)
+    y_pred_prob = model.predict_proba(X_eval)
+    # For binary classification, y_score only accepts the probability of greater label
+    y_pred_prob_roc = y_pred_prob[:, 1]
+
+    expected_metrics = {
+        "val_score": model.score(X_eval, y_eval),
+        "val_accuracy_score": sklearn.metrics.accuracy_score(y_eval, y_pred),
+        "val_precision_score": sklearn.metrics.precision_score(y_eval, y_pred, pos_label=1),
+        "val_recall_score": sklearn.metrics.recall_score(y_eval, y_pred, pos_label=1),
+        "val_f1_score": sklearn.metrics.f1_score(y_eval, y_pred, pos_label=1),
+        "val_log_loss": sklearn.metrics.log_loss(y_eval, y_pred_prob),
+    }
+    if _is_metric_supported("roc_auc_score"):
+        expected_metrics["val_roc_auc_score"] = sklearn.metrics.roc_auc_score(
+            y_eval,
+            y_score=y_pred_prob_roc,
+            average="weighted",
+            multi_class="ovo",
+        )
+    assert eval_metrics == pytest.approx(expected_metrics)
+
+    eval_artifacts = []
+    if _is_plotting_supported():
+        eval_artifacts.extend(
+            [
+                "{}.png".format("val_confusion_matrix"),
+                "{}.png".format("val_roc_curve"),
+                "{}.png".format("val_precision_recall_curve"),
+            ]
+        )
+
+    # Check that logged artifacts/metrics are the same as the ones returned by the method
+    run_id = run.info.run_id
+    _, metrics, _, artifacts = get_run_data(run_id)
+
+    assert metrics == eval_metrics
+    assert sorted(artifacts) == sorted(eval_artifacts)
+
+
 def test_eval_and_log_metrics_matches_training_metrics():
     mlflow.sklearn.autolog()
 
@@ -1874,10 +1932,8 @@ def test_is_metrics_value_loggable():
     is_metric_value_loggable = mlflow.sklearn._AutologgingMetricsManager.is_metric_value_loggable
     assert is_metric_value_loggable(3)
     assert is_metric_value_loggable(3.5)
-    assert is_metric_value_loggable(np.int(3))
     assert is_metric_value_loggable(np.float32(3.5))
     assert not is_metric_value_loggable(True)
-    assert not is_metric_value_loggable(np.bool(True))
     assert not is_metric_value_loggable([1, 2])
     assert not is_metric_value_loggable(np.array([1, 2]))
 
@@ -1915,8 +1971,7 @@ def test_autolog_print_warning_if_custom_estimator_pickling_raise_error():
 
     with mlflow.start_run() as run, mock.patch("mlflow.sklearn._logger.warning") as mock_warning:
         non_pickable_kmeans = NonPickleableKmeans()
-
-        with pytest.raises(TypeError, match="can't pickle generator objects"):
+        with pytest.raises(TypeError, match=r"(can't|cannot) pickle.+generator"):
             pickle.dumps(non_pickable_kmeans)
 
         non_pickable_kmeans.fit(*get_iris())
@@ -1928,3 +1983,15 @@ def test_autolog_print_warning_if_custom_estimator_pickling_raise_error():
     run_id = run.info.run_id
     params, metrics, tags, artifacts = get_run_data(run_id)
     assert len(params) > 0 and len(metrics) > 0 and len(tags) > 0 and artifacts == []
+
+
+@pytest.mark.large
+def test_autolog_registering_model():
+    registered_model_name = "test_autolog_registered_model"
+
+    mlflow.sklearn.autolog(registered_model_name=registered_model_name)
+    with mlflow.start_run():
+        sklearn.cluster.KMeans().fit(*get_iris())
+
+        registered_model = MlflowClient().get_registered_model(registered_model_name)
+        assert registered_model.name == registered_model_name

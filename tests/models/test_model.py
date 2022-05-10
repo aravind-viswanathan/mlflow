@@ -12,10 +12,12 @@ from mlflow.models.signature import ModelSignature
 from mlflow.models.utils import _save_example
 from mlflow.types.schema import Schema, ColSpec, TensorSpec
 from mlflow.utils.file_utils import TempDir
+from mlflow.utils.model_utils import _validate_and_prepare_target_save_path
 from mlflow.utils.proto_json_utils import _dataframe_from_json
 
 from unittest import mock
 from scipy.sparse import csc_matrix
+from packaging.version import Version
 
 
 def test_model_save_load():
@@ -58,12 +60,12 @@ def test_model_save_load():
     assert m.to_yaml() == o.to_yaml()
 
 
-class TestFlavor(object):
+class TestFlavor:
     @classmethod
     def save_model(cls, path, mlflow_model, signature=None, input_example=None):
         mlflow_model.flavors["flavor1"] = {"a": 1, "b": 2}
         mlflow_model.flavors["flavor2"] = {"x": 1, "y": 2}
-        os.makedirs(path)
+        _validate_and_prepare_target_save_path(path)
         if signature is not None:
             mlflow_model.signature = signature
         if input_example is not None:
@@ -109,6 +111,59 @@ def test_model_log():
         loaded_example = loaded_model.load_input_example(local_path)
         assert isinstance(loaded_example, pd.DataFrame)
         assert loaded_example.to_dict(orient="records")[0] == input_example
+
+        assert Version(loaded_model.mlflow_version) == Version(mlflow.version.VERSION)
+
+
+def test_model_info():
+    with TempDir(chdr=True) as tmp:
+        sig = ModelSignature(
+            inputs=Schema([ColSpec("integer", "x"), ColSpec("integer", "y")]),
+            outputs=Schema([ColSpec(name=None, type="double")]),
+        )
+        input_example = {"x": 1, "y": 2}
+
+        experiment_id = mlflow.create_experiment("test")
+        with mlflow.start_run(experiment_id=experiment_id) as run:
+            model_info = Model.log(
+                "some/path", TestFlavor, signature=sig, input_example=input_example
+            )
+        local_path = _download_artifact_from_uri(
+            "runs:/{}/some/path".format(run.info.run_id), output_path=tmp.path("")
+        )
+
+        assert model_info.run_id == run.info.run_id
+        assert model_info.artifact_path == "some/path"
+        assert model_info.model_uri == "runs:/{}/some/path".format(run.info.run_id)
+
+        loaded_model = Model.load(os.path.join(local_path, "MLmodel"))
+        assert model_info.utc_time_created == loaded_model.utc_time_created
+        assert model_info.model_uuid == loaded_model.model_uuid
+
+        assert model_info.flavors == {
+            "flavor1": {"a": 1, "b": 2},
+            "flavor2": {"x": 1, "y": 2},
+        }
+
+        path = os.path.join(local_path, model_info.saved_input_example_info["artifact_path"])
+        x = _dataframe_from_json(path)
+        assert x.to_dict(orient="records")[0] == input_example
+
+        assert model_info.signature_dict == sig.to_dict()
+
+        assert Version(model_info.mlflow_version) == Version(loaded_model.mlflow_version)
+
+
+def test_load_model_without_mlflow_version():
+
+    with TempDir(chdr=True) as tmp:
+        model = Model(artifact_path="some/path", run_id="1234", mlflow_version=None)
+        path = tmp.path("model")
+        with open(path, "w") as out:
+            model.to_yaml(out)
+        loaded_model = Model.load(path)
+
+        assert loaded_model.mlflow_version is None
 
 
 def test_model_log_with_databricks_runtime():

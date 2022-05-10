@@ -23,7 +23,9 @@ from mlflow.utils.mlflow_tags import (
     MLFLOW_DATABRICKS_SHELL_JOB_RUN_ID,
     MLFLOW_DATABRICKS_WEBAPP_URL,
 )
-from mlflow.utils.rest_utils import _DEFAULT_HEADERS
+from mlflow.tracking.request_header.default_request_header_provider import (
+    DefaultRequestHeaderProvider,
+)
 from mlflow.utils.uri import construct_db_uri_from_profile
 from tests import helper_functions
 from tests.integration.utils import invoke_cli_runner
@@ -440,7 +442,7 @@ def test_databricks_http_request_integration(get_config, request):
     """Confirms that the databricks http request params can in fact be used as an HTTP request"""
 
     def confirm_request_params(*args, **kwargs):
-        headers = dict(_DEFAULT_HEADERS)
+        headers = DefaultRequestHeaderProvider().request_headers()
         headers["Authorization"] = "Basic dXNlcjpwYXNz"
         assert args == ("PUT", "host/clusters/list")
         assert kwargs == {
@@ -483,7 +485,11 @@ def test_run_databricks_failed(_):
 
 def test_run_databricks_generates_valid_mlflow_run_cmd():
     cmd = _get_cluster_mlflow_run_cmd(
-        project_dir="my_project_dir", run_id="hi", entry_point="main", parameters={"a": "b"}
+        project_dir="my_project_dir",
+        run_id="hi",
+        entry_point="main",
+        parameters={"a": "b"},
+        env_manager="conda",
     )
     assert cmd[0] == "mlflow"
     with mock.patch("mlflow.projects.run"):

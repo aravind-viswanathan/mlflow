@@ -1,3 +1,4 @@
+import os
 import sys
 from unittest import mock
 import pytest
@@ -21,6 +22,7 @@ def test_no_throw():
     None.
     """
     assert not databricks_utils.is_in_databricks_notebook()
+    assert not databricks_utils.is_in_databricks_repo_notebook()
     assert not databricks_utils.is_in_databricks_job()
     assert not databricks_utils.is_dbfs_fuse_available()
     assert not databricks_utils.is_in_databricks_runtime()
@@ -211,20 +213,10 @@ def test_databricks_params_throws_errors(ProfileConfigProvider):
 
 
 def test_is_in_databricks_runtime():
-    with mock.patch(
-        "sys.modules",
-        new={**sys.modules, "pyspark": mock.MagicMock(), "pyspark.databricks": mock.MagicMock()},
-    ):
-        # pylint: disable=unused-import,import-error,no-name-in-module,unused-variable
-        import pyspark.databricks
-
+    with mock.patch.dict(os.environ, {"DATABRICKS_RUNTIME_VERSION": "11.x"}):
         assert databricks_utils.is_in_databricks_runtime()
 
-    with mock.patch("sys.modules", new={**sys.modules, "pyspark": mock.MagicMock()}):
-        with pytest.raises(ModuleNotFoundError, match="No module named 'pyspark.databricks'"):
-            # pylint: disable=unused-import,import-error,no-name-in-module,unused-variable
-            import pyspark.databricks
-        assert not databricks_utils.is_in_databricks_runtime()
+    assert not databricks_utils.is_in_databricks_runtime()
 
 
 def test_get_repl_id():
@@ -264,6 +256,9 @@ def test_use_repl_context_if_available(tmpdir):
 
     command_context_mock = mock.MagicMock()
     command_context_mock.jobId().get.return_value = "job_id"
+    command_context_mock.tags().get(  # pylint: disable=not-callable
+        "jobType"
+    ).get.return_value = "NORMAL"
     with mock.patch(
         "mlflow.utils.databricks_utils._get_command_context", return_value=command_context_mock
     ) as mock_get_command_context:
@@ -287,7 +282,9 @@ def get_context():
         "mlflow.utils.databricks_utils._get_command_context", return_value=command_context_mock
     ) as mock_get_command_context:
         assert databricks_utils.get_job_id() == "job_id"
-        mock_get_command_context.assert_called_once()
+        assert databricks_utils.get_experiment_name_from_job_id("job_id") == "jobs:/job_id"
+        assert databricks_utils.get_job_type_info() == "NORMAL"
+        assert mock_get_command_context.call_count == 2
 
     with mock.patch(
         "dbruntime.databricks_repl_context.get_context",
@@ -299,13 +296,22 @@ def get_context():
 
     with mock.patch(
         "dbruntime.databricks_repl_context.get_context",
-        return_value=mock.MagicMock(notebookId="notebook_id"),
+        return_value=mock.MagicMock(notebookId="notebook_id", notebookPath="/Repos/notebook_path"),
     ) as mock_get_context, mock.patch(
         "mlflow.utils.databricks_utils._get_property_from_spark_context"
     ) as mock_spark_context:
         assert databricks_utils.get_notebook_id() == "notebook_id"
-        mock_get_context.assert_called_once()
+        assert databricks_utils.is_in_databricks_repo_notebook()
+        assert mock_get_context.call_count == 2
         mock_spark_context.assert_not_called()
+
+    with mock.patch(
+        "dbruntime.databricks_repl_context.get_context",
+        return_value=mock.MagicMock(notebookId="notebook_id", notebookPath="/Users/notebook_path"),
+    ) as mock_get_context, mock.patch(
+        "mlflow.utils.databricks_utils._get_property_from_spark_context"
+    ) as mock_spark_context:
+        assert not databricks_utils.is_in_databricks_repo_notebook()
 
     with mock.patch(
         "dbruntime.databricks_repl_context.get_context",

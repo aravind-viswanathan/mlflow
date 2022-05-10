@@ -9,7 +9,7 @@ import yaml
 import paddle
 from paddle.nn import Linear
 import paddle.nn.functional as F
-from sklearn.datasets import load_boston
+from sklearn.datasets import load_diabetes
 from sklearn.model_selection import train_test_split
 from sklearn import preprocessing
 
@@ -24,15 +24,18 @@ from mlflow.utils.model_utils import _get_flavor_configuration
 from mlflow.tracking._model_registry import DEFAULT_AWAIT_MAX_SLEEP_SECONDS
 
 from tests.helper_functions import mock_s3_bucket  # pylint: disable=unused-import
-from tests.helper_functions import set_boto_credentials  # pylint: disable=unused-import
-from tests.helper_functions import pyfunc_serve_and_score_model, _assert_pip_requirements
+from tests.helper_functions import (
+    pyfunc_serve_and_score_model,
+    _assert_pip_requirements,
+    _compare_logged_code_paths,
+)
 
 
 ModelWithData = namedtuple("ModelWithData", ["model", "inference_dataframe"])
 
 
 def get_dataset():
-    X, y = load_boston(return_X_y=True)
+    X, y = load_diabetes(return_X_y=True)
 
     min_max_scaler = preprocessing.MinMaxScaler()
     X_min_max = min_max_scaler.fit_transform(X)
@@ -50,28 +53,28 @@ def get_dataset():
 @pytest.fixture
 def pd_model():
     class Regressor(paddle.nn.Layer):
-        def __init__(self):
+        def __init__(self, in_features):
             super(Regressor, self).__init__()
-            self.fc_ = Linear(in_features=13, out_features=1)
+            self.fc_ = Linear(in_features=in_features, out_features=1)
 
         @paddle.jit.to_static
         def forward(self, inputs):  # pylint: disable=arguments-differ
             return self.fc_(inputs)
 
-    model = Regressor()
-    model.train()
     training_data, test_data = get_dataset()
+    model = Regressor(training_data.shape[1] - 1)
+    model.train()
     opt = paddle.optimizer.SGD(learning_rate=0.01, parameters=model.parameters())
 
     EPOCH_NUM = 10
     BATCH_SIZE = 10
 
-    for epoch_id in range(EPOCH_NUM):
+    for _ in range(EPOCH_NUM):
         np.random.shuffle(training_data)
         mini_batches = [
             training_data[k : k + BATCH_SIZE] for k in range(0, len(training_data), BATCH_SIZE)
         ]
-        for iter_id, mini_batch in enumerate(mini_batches):
+        for mini_batch in mini_batches:
             x = np.array(mini_batch[:, :-1]).astype("float32")
             y = np.array(mini_batch[:, -1:]).astype("float32")
             house_features = paddle.to_tensor(x)
@@ -79,10 +82,6 @@ def pd_model():
             predicts = model(house_features)
             loss = F.square_error_cost(predicts, label=prices)
             avg_loss = paddle.mean(loss)
-            if iter_id % 20 == 0:
-                print(
-                    "epoch: {}, iter: {}, loss is: {}".format(epoch_id, iter_id, avg_loss.numpy())
-                )
 
             avg_loss.backward()
             opt.step()
@@ -109,7 +108,7 @@ def test_model_save_load(pd_model, model_path):
     mlflow.paddle.save_model(pd_model=pd_model.model, path=model_path)
 
     reloaded_pd_model = mlflow.paddle.load_model(model_uri=model_path)
-    reloaded_pyfunc = pyfunc.load_pyfunc(model_uri=model_path)
+    reloaded_pyfunc = pyfunc.load_model(model_uri=model_path)
 
     np.testing.assert_array_almost_equal(
         pd_model.model(pd_model.inference_dataframe),
@@ -149,10 +148,13 @@ def test_model_log(pd_model, model_path, tmpdir):
         conda_env = os.path.join(tmpdir, "conda_env.yaml")
         _mlflow_conda_env(conda_env, additional_pip_deps=["paddle"])
 
-        mlflow.paddle.log_model(pd_model=model, artifact_path=artifact_path, conda_env=conda_env)
+        model_info = mlflow.paddle.log_model(
+            pd_model=model, artifact_path=artifact_path, conda_env=conda_env
+        )
         model_uri = "runs:/{run_id}/{artifact_path}".format(
             run_id=mlflow.active_run().info.run_id, artifact_path=artifact_path
         )
+        assert model_info.model_uri == model_uri
 
         reloaded_pd_model = mlflow.paddle.load_model(model_uri=model_uri)
         np.testing.assert_array_almost_equal(
@@ -272,7 +274,7 @@ def test_model_log_without_specified_conda_env_uses_default_env_with_expected_de
     _assert_pip_requirements(model_uri, mlflow.paddle.get_default_pip_requirements())
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="module")
 def get_dataset_built_in_high_level_api():
     train_dataset = paddle.text.datasets.UCIHousing(mode="train")
     eval_dataset = paddle.text.datasets.UCIHousing(mode="test")
@@ -309,7 +311,7 @@ def test_model_save_load_built_in_high_level_api(pd_model_built_in_high_level_ap
     mlflow.paddle.save_model(pd_model=model, path=model_path)
 
     reloaded_pd_model = mlflow.paddle.load_model(model_uri=model_path)
-    reloaded_pyfunc = pyfunc.load_pyfunc(model_uri=model_path)
+    reloaded_pyfunc = pyfunc.load_model(model_uri=model_path)
 
     low_level_test_dataset = [x[0] for x in test_dataset]
 
@@ -423,7 +425,7 @@ def test_model_retrain_built_in_high_level_api(
         mlflow.paddle.load_model(model_uri=model_retrain_path, model=error_model)
 
     reloaded_pd_model = mlflow.paddle.load_model(model_uri=model_retrain_path)
-    reloaded_pyfunc = pyfunc.load_pyfunc(model_uri=model_retrain_path)
+    reloaded_pyfunc = pyfunc.load_model(model_uri=model_retrain_path)
     low_level_test_dataset = [x[0] for x in test_dataset]
 
     np.testing.assert_array_almost_equal(
@@ -554,5 +556,17 @@ def test_pyfunc_serve_and_score(pd_model):
         data=pd.DataFrame(inference_dataframe),
         content_type=pyfunc_scoring_server.CONTENT_TYPE_JSON_SPLIT_ORIENTED,
     )
-    scores = pd.read_json(resp.content, orient="records").values.squeeze()
+    scores = pd.read_json(resp.content.decode("utf-8"), orient="records").values.squeeze()
     np.testing.assert_array_almost_equal(scores, model(inference_dataframe).squeeze())
+
+
+def test_log_model_with_code_paths(pd_model):
+    artifact_path = "model"
+    with mlflow.start_run(), mock.patch(
+        "mlflow.paddle._add_code_from_conf_to_system_path"
+    ) as add_mock:
+        mlflow.paddle.log_model(pd_model.model, artifact_path, code_paths=[__file__])
+        model_uri = mlflow.get_artifact_uri(artifact_path)
+        _compare_logged_code_paths(__file__, model_uri, mlflow.paddle.FLAVOR_NAME)
+        mlflow.paddle.load_model(model_uri)
+        add_mock.assert_called()

@@ -5,6 +5,7 @@ import pytest
 import yaml
 import pandas as pd
 from collections import namedtuple
+from unittest import mock
 
 import numpy as np
 import sklearn.datasets as datasets
@@ -26,6 +27,7 @@ from tests.helper_functions import (
     pyfunc_serve_and_score_model,
     _compare_conda_env_requirements,
     _assert_pip_requirements,
+    _compare_logged_code_paths,
 )
 
 ModelWithData = namedtuple("ModelWithData", ["model", "inference_data"])
@@ -74,7 +76,7 @@ def test_model_save_load(h2o_iris_model, model_path):
     )
 
     # Loading pyfunc model
-    pyfunc_loaded = mlflow.pyfunc.load_pyfunc(model_path)
+    pyfunc_loaded = mlflow.pyfunc.load_model(model_path)
     assert all(
         pyfunc_loaded.predict(h2o_iris_model.inference_data.as_data_frame())
         == h2o_model.predict(h2o_iris_model.inference_data).as_data_frame()
@@ -103,10 +105,11 @@ def test_model_log(h2o_iris_model):
     h2o_model = h2o_iris_model.model
     try:
         artifact_path = "gbm_model"
-        mlflow.h2o.log_model(h2o_model=h2o_model, artifact_path=artifact_path)
+        model_info = mlflow.h2o.log_model(h2o_model=h2o_model, artifact_path=artifact_path)
         model_uri = "runs:/{run_id}/{artifact_path}".format(
             run_id=mlflow.active_run().info.run_id, artifact_path=artifact_path
         )
+        assert model_info.model_uri == model_uri
         # Load model
         h2o_model_loaded = mlflow.h2o.load_model(model_uri=model_uri)
         assert all(
@@ -326,6 +329,18 @@ def test_pyfunc_serve_and_score(h2o_iris_model):
         data=inference_dataframe.as_data_frame(),
         content_type=pyfunc_scoring_server.CONTENT_TYPE_JSON_SPLIT_ORIENTED,
     )
-    scores = pd.read_json(resp.content, orient="records").drop("predict", axis=1)
+    scores = pd.read_json(resp.content.decode("utf-8"), orient="records").drop("predict", axis=1)
     preds = model.predict(inference_dataframe).as_data_frame().drop("predict", axis=1)
     np.testing.assert_array_almost_equal(scores, preds)
+
+
+def test_log_model_with_code_paths(h2o_iris_model):
+    artifact_path = "model_uri"
+    with mlflow.start_run(), mock.patch(
+        "mlflow.h2o._add_code_from_conf_to_system_path"
+    ) as add_mock:
+        mlflow.h2o.log_model(h2o_iris_model.model, artifact_path, code_paths=[__file__])
+        model_uri = mlflow.get_artifact_uri(artifact_path)
+        _compare_logged_code_paths(__file__, model_uri, mlflow.h2o.FLAVOR_NAME)
+        mlflow.h2o.load_model(model_uri)
+        add_mock.assert_called()

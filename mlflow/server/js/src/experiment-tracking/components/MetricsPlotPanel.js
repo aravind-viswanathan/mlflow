@@ -13,6 +13,7 @@ import {
   X_AXIS_RELATIVE,
   X_AXIS_STEP,
 } from './MetricsPlotControls';
+import MetricsSummaryTable from './MetricsSummaryTable';
 import qs from 'qs';
 import { withRouter } from 'react-router-dom';
 import Routes from '../routes';
@@ -29,7 +30,7 @@ export const METRICS_PLOT_HANGING_RUN_THRESHOLD_MS = 3600 * 24 * 7 * 1000; // 1 
 
 export class MetricsPlotPanel extends React.Component {
   static propTypes = {
-    experimentId: PropTypes.string.isRequired,
+    experimentIds: PropTypes.arrayOf(PropTypes.string).isRequired,
     runUuids: PropTypes.arrayOf(PropTypes.string).isRequired,
     completedRunUuids: PropTypes.arrayOf(PropTypes.string).isRequired,
     metricKey: PropTypes.string.isRequired,
@@ -85,6 +86,10 @@ export class MetricsPlotPanel extends React.Component {
     this.loadMetricHistory(this.props.runUuids, this.getUrlState().selectedMetricKeys);
   }
 
+  hasMultipleExperiments() {
+    return this.props.experimentIds && this.props.experimentIds.length > 1;
+  }
+
   onFocus = () => {
     this.setState({ focused: true });
   };
@@ -104,6 +109,7 @@ export class MetricsPlotPanel extends React.Component {
     // `clearInterval` does nothing when called with `null` or `undefine`:
     // https://www.w3.org/TR/2011/WD-html5-20110525/timers.html#dom-windowtimers-cleartimeout
     clearInterval(this.intervalId);
+    this.intervalId = null;
   };
 
   allRunsCompleted = () => {
@@ -183,7 +189,7 @@ export class MetricsPlotPanel extends React.Component {
   // state updates, e.g. in a setState callback
   updateUrlState = (updatedState) => {
     const { runUuids, metricKey, location, history } = this.props;
-    const experimentId = qs.parse(location.search)['experiment'];
+    const experimentIds = JSON.parse(qs.parse(location.search)['experiments']);
     const newState = {
       ...this.getUrlState(),
       ...updatedState,
@@ -202,7 +208,7 @@ export class MetricsPlotPanel extends React.Component {
       Routes.getMetricPageRoute(
         runUuids,
         metricKey,
-        experimentId,
+        experimentIds,
         selectedMetricKeys,
         layout,
         selectedXAxis,
@@ -551,7 +557,7 @@ export class MetricsPlotPanel extends React.Component {
   };
 
   render() {
-    const { experimentId, runUuids, runDisplayNames, distinctMetricKeys, location } = this.props;
+    const { experimentIds, runUuids, runDisplayNames, distinctMetricKeys, location } = this.props;
     const { popoverVisible, popoverX, popoverY, popoverRunItems } = this.state;
     const state = this.getUrlState();
     const { showPoint, selectedXAxis, selectedMetricKeys, lineSmoothness } = state;
@@ -577,41 +583,50 @@ export class MetricsPlotPanel extends React.Component {
           yAxisLogScale={yAxisLogScale}
           showPoint={showPoint}
         />
-        <RequestStateWrapper
-          requestIds={historyRequestIds}
-          // In this case where there are no history request IDs (e.g. on the
-          // initial page load / before we try to load additional metrics),
-          // optimistically render the children
-          shouldOptimisticallyRender={historyRequestIds.length === 0}
-        >
-          <RunLinksPopover
-            experimentId={experimentId}
-            visible={popoverVisible}
-            x={popoverX}
-            y={popoverY}
-            runItems={popoverRunItems}
-            handleKeyDown={this.handleKeyDownOnPopover}
-            handleClose={() => this.setState({ popoverVisible: false })}
-            handleVisibleChange={(visible) => this.setState({ popoverVisible: visible })}
-          />
-          <MetricsPlotView
-            runUuids={runUuids}
-            runDisplayNames={runDisplayNames}
-            xAxis={selectedXAxis}
-            metrics={this.getMetrics()}
-            metricKeys={selectedMetricKeys}
-            showPoint={showPoint}
-            chartType={chartType}
-            isComparing={MetricsPlotPanel.isComparing(location.search)}
-            lineSmoothness={lineSmoothness}
-            extraLayout={state.layout}
-            deselectedCurves={state.deselectedCurves}
-            onLayoutChange={this.handleLayoutChange}
-            onClick={this.updatePopover}
-            onLegendClick={this.handleLegendClick}
-            onLegendDoubleClick={this.handleLegendDoubleClick}
-          />
-        </RequestStateWrapper>
+        <div className='metrics-plot-data'>
+          <RequestStateWrapper
+            requestIds={historyRequestIds}
+            // In this case where there are no history request IDs (e.g. on the
+            // initial page load / before we try to load additional metrics),
+            // optimistically render the children
+            shouldOptimisticallyRender={historyRequestIds.length === 0}
+          >
+            {this.hasMultipleExperiments() ? null : (
+              <RunLinksPopover
+                experimentId={experimentIds[0]}
+                visible={popoverVisible}
+                x={popoverX}
+                y={popoverY}
+                runItems={popoverRunItems}
+                handleKeyDown={this.handleKeyDownOnPopover}
+                handleClose={() => this.setState({ popoverVisible: false })}
+                handleVisibleChange={(visible) => this.setState({ popoverVisible: visible })}
+              />
+            )}
+            <MetricsPlotView
+              runUuids={runUuids}
+              runDisplayNames={runDisplayNames}
+              xAxis={selectedXAxis}
+              metrics={this.getMetrics()}
+              metricKeys={selectedMetricKeys}
+              showPoint={showPoint}
+              chartType={chartType}
+              isComparing={MetricsPlotPanel.isComparing(location.search)}
+              lineSmoothness={lineSmoothness}
+              extraLayout={state.layout}
+              deselectedCurves={state.deselectedCurves}
+              onLayoutChange={this.handleLayoutChange}
+              onClick={this.updatePopover}
+              onLegendClick={this.handleLegendClick}
+              onLegendDoubleClick={this.handleLegendDoubleClick}
+            />
+            <MetricsSummaryTable
+              runUuids={runUuids}
+              runDisplayNames={runDisplayNames}
+              metricKeys={selectedMetricKeys}
+            />
+          </RequestStateWrapper>
+        </div>
       </div>
     );
   }

@@ -37,8 +37,8 @@ from tests.helper_functions import (
     _assert_pip_requirements,
     _is_available_on_pypi,
     _is_importable,
+    _compare_logged_code_paths,
 )
-from tests.helper_functions import set_boto_credentials  # pylint: disable=unused-import
 from tests.helper_functions import mock_s3_bucket  # pylint: disable=unused-import
 from tests.pyfunc.test_spark import score_model_as_udf
 from mlflow.tracking._model_registry import DEFAULT_AWAIT_MAX_SLEEP_SECONDS
@@ -60,7 +60,9 @@ else:
     from keras.optimizers import SGD
 
 
-EXTRA_PYFUNC_SERVING_TEST_ARGS = [] if _is_available_on_pypi("keras") else ["--no-conda"]
+EXTRA_PYFUNC_SERVING_TEST_ARGS = (
+    [] if _is_available_on_pypi("keras") else ["--env-manager", "local"]
+)
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -191,7 +193,7 @@ def keras_custom_env(tmpdir):
 
 @pytest.mark.allow_infer_pip_requirements_fallback
 def test_that_keras_module_arg_works(model_path):
-    class MyModel(object):
+    class MyModel:
         def __init__(self, x):
             self._x = x
 
@@ -203,7 +205,7 @@ def test_that_keras_module_arg_works(model_path):
             with h5py.File(path, "w") as f:
                 f.create_dataset(name="x", data=self._x)
 
-    class FakeKerasModule(object):
+    class FakeKerasModule:
         __name__ = "some.test.keras.module"
         __version__ = "42.42.42"
 
@@ -293,9 +295,8 @@ def test_model_save_load(build_model, save_format, model_path, data):
         content_type=pyfunc_scoring_server.CONTENT_TYPE_JSON_SPLIT_ORIENTED,
         extra_args=EXTRA_PYFUNC_SERVING_TEST_ARGS,
     )
-    print(scoring_response.content)
     actual_scoring_response = pd.read_json(
-        scoring_response.content, orient="records", encoding="utf8"
+        scoring_response.content.decode("utf-8"), orient="records", encoding="utf8"
     ).values.astype(np.float32)
     np.testing.assert_allclose(actual_scoring_response, expected, rtol=1e-5)
 
@@ -401,10 +402,11 @@ def test_model_log(model, data, predicted):
             if should_start_run:
                 mlflow.start_run()
             artifact_path = "keras_model"
-            mlflow.keras.log_model(model, artifact_path=artifact_path)
+            model_info = mlflow.keras.log_model(model, artifact_path=artifact_path)
             model_uri = "runs:/{run_id}/{artifact_path}".format(
                 run_id=mlflow.active_run().info.run_id, artifact_path=artifact_path
             )
+            assert model_info.model_uri == model_uri
 
             # Load model
             model_loaded = mlflow.keras.load_model(model_uri=model_uri)
@@ -705,3 +707,16 @@ def test_pyfunc_serve_and_score_transformers():
     data = json.dumps({"inputs": dummy_inputs.tolist()})
     resp = pyfunc_serve_and_score_model(model_uri, data, pyfunc_scoring_server.CONTENT_TYPE_JSON)
     np.testing.assert_array_equal(json.loads(resp.content), model.predict(dummy_inputs))
+
+
+@pytest.mark.large
+def test_log_model_with_code_paths(model):
+    artifact_path = "model"
+    with mlflow.start_run(), mock.patch(
+        "mlflow.keras._add_code_from_conf_to_system_path"
+    ) as add_mock:
+        mlflow.keras.log_model(model, artifact_path, code_paths=[__file__])
+        model_uri = mlflow.get_artifact_uri(artifact_path)
+        _compare_logged_code_paths(__file__, model_uri, mlflow.keras.FLAVOR_NAME)
+        mlflow.keras.load_model(model_uri)
+        add_mock.assert_called()

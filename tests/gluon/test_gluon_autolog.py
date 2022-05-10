@@ -1,7 +1,6 @@
 from packaging.version import Version
 import pickle
 import random
-import warnings
 
 import mxnet as mx
 import numpy as np
@@ -12,6 +11,7 @@ from mxnet.gluon.nn import HybridSequential, Dense
 
 import mlflow
 import mlflow.gluon
+from mlflow.tracking.client import MlflowClient
 from mlflow.gluon._autolog import __MLflowGluonCallback
 from mlflow.utils.autologging_utils import BatchMetricsLogger
 from unittest.mock import patch
@@ -64,9 +64,7 @@ def get_gluon_random_data_run(log_models=True):
         )
         est = get_estimator(model, trainer)
 
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            est.fit(data, epochs=3, val_data=validation)
+        est.fit(data, epochs=3, val_data=validation)
     client = mlflow.tracking.MlflowClient()
     return client.get_run(run.info.run_id)
 
@@ -165,9 +163,7 @@ def test_autolog_ends_auto_created_run():
     )
     est = get_estimator(model, trainer)
 
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        est.fit(data, epochs=3)
+    est.fit(data, epochs=3)
 
     assert mlflow.active_run() is None
 
@@ -193,9 +189,7 @@ def test_autolog_persists_manually_created_run():
         )
         est = get_estimator(model, trainer)
 
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            est.fit(data, epochs=3)
+        est.fit(data, epochs=3)
 
         assert mlflow.active_run().info.run_id == run.info.run_id
 
@@ -203,3 +197,28 @@ def test_autolog_persists_manually_created_run():
 def test_callback_is_callable():
     cb = __MLflowGluonCallback(log_models=True, metrics_logger=BatchMetricsLogger(run_id="1234"))
     pickle.dumps(cb)
+
+
+@pytest.mark.large
+def test_autolog_registering_model():
+    registered_model_name = "test_autolog_registered_model"
+    mlflow.gluon.autolog(registered_model_name=registered_model_name)
+
+    data = DataLoader(LogsDataset(), batch_size=128, last_batch="discard")
+
+    model = HybridSequential()
+    model.add(Dense(64, activation="relu"))
+    model.add(Dense(10))
+    model.initialize()
+    model.hybridize()
+
+    trainer = Trainer(
+        model.collect_params(), "adam", optimizer_params={"learning_rate": 0.001, "epsilon": 1e-07}
+    )
+    est = get_estimator(model, trainer)
+
+    with mlflow.start_run():
+        est.fit(data, epochs=3)
+
+        registered_model = MlflowClient().get_registered_model(registered_model_name)
+        assert registered_model.name == registered_model_name

@@ -12,6 +12,7 @@ import { message } from 'antd';
 import _ from 'lodash';
 import { ErrorCodes, SupportPageUrl } from '../constants';
 import { FormattedMessage } from 'react-intl';
+import { ErrorWrapper } from './ErrorWrapper';
 
 message.config({
   maxCount: 1,
@@ -102,8 +103,8 @@ class Utils {
     return dateFormat(d, format);
   }
 
-  static timeSinceStr(date) {
-    const seconds = Math.max(0, Math.floor((new Date() - date) / 1000));
+  static timeSinceStr(date, referenceDate = new Date()) {
+    const seconds = Math.max(0, Math.floor((referenceDate - date) / 1000));
 
     let interval = Math.floor(seconds / 31536000);
 
@@ -391,19 +392,8 @@ class Utils {
         );
       }
       return res;
-    } else if (sourceType === 'NOTEBOOK') {
-      const revisionId = Utils.getNotebookRevisionId(tags);
-      const notebookId = Utils.getNotebookId(tags);
-      return this.renderNotebookSource(queryParams, notebookId, revisionId, runUuid, sourceName);
-    } else if (sourceType === 'JOB') {
-      const jobIdTag = 'mlflow.databricks.jobID';
-      const jobRunIdTag = 'mlflow.databricks.jobRunID';
-      const jobId = tags && tags[jobIdTag] && tags[jobIdTag].value;
-      const jobRunId = tags && tags[jobRunIdTag] && tags[jobRunIdTag].value;
-      return this.renderJobSource(queryParams, jobId, jobRunId, res);
-    } else {
-      return res;
     }
+    return res;
   }
 
   /**
@@ -415,6 +405,7 @@ class Utils {
     revisionId,
     runUuid,
     sourceName,
+    workspaceUrl = null,
     nameOverride = null,
   ) {
     // sourceName may not be present when rendering feature table notebook consumers from remote
@@ -424,7 +415,7 @@ class Utils {
       ? Utils.baseName(sourceName)
       : Utils.getDefaultNotebookRevisionName(notebookId, revisionId);
     if (notebookId) {
-      let url = Utils.setQueryParams(window.location.origin, queryParams);
+      let url = Utils.setQueryParams(workspaceUrl || window.location.origin, queryParams);
       url += `#notebook/${notebookId}`;
       if (revisionId) {
         url += `/revision/${revisionId}`;
@@ -449,13 +440,20 @@ class Utils {
   /**
    * Renders the job source name and entry point into an HTML element. Used for display.
    */
-  static renderJobSource(queryParams, jobId, jobRunId, jobName, nameOverride = null) {
+  static renderJobSource(
+    queryParams,
+    jobId,
+    jobRunId,
+    jobName,
+    workspaceUrl = null,
+    nameOverride = null,
+  ) {
     if (jobId) {
       // jobName may not be present when rendering feature table job consumers from remote
       // workspaces or when getJob API failed to fetch the jobName. Always provide a default
       // job name in such case.
       const reformatJobName = jobName || Utils.getDefaultJobRunName(jobId, jobRunId);
-      let url = Utils.setQueryParams(window.location.origin, queryParams);
+      let url = Utils.setQueryParams(workspaceUrl || window.location.origin, queryParams);
       url += `#job/${jobId}`;
       if (jobRunId) {
         url += `/run/${jobRunId}`;
@@ -611,6 +609,10 @@ class Utils {
     const sourceVersion = Utils.getSourceVersion(tags);
     const sourceName = Utils.getSourceName(tags);
     const sourceType = Utils.getSourceType(tags);
+    return Utils.renderSourceVersion(sourceVersion, sourceName, sourceType, shortVersion);
+  }
+
+  static renderSourceVersion(sourceVersion, sourceName, sourceType, shortVersion = true) {
     if (sourceVersion) {
       const versionString = shortVersion ? sourceVersion.substring(0, 6) : sourceVersion;
       if (sourceType === 'PROJECT') {
@@ -850,20 +852,54 @@ class Utils {
     });
   }
 
-  static getAjaxUrl(relativeUrl) {
-    if (process.env.USE_ABSOLUTE_AJAX_URLS === 'true') {
-      return '/' + relativeUrl;
-    }
-    return relativeUrl;
-  }
-
   static logErrorAndNotifyUser(e) {
     console.error(e);
-    // not all error is wrapped by ErrorWrapper
-    if (e.renderHttpError) {
+    if (typeof e === 'string') {
+      message.error(e);
+    } else if (e instanceof ErrorWrapper) {
+      // not all error is wrapped by ErrorWrapper
       message.error(e.renderHttpError());
     }
   }
+
+  static sortExperimentsById = (experiments) => {
+    return _.sortBy(experiments, [({ experiment_id }) => experiment_id]);
+  };
+
+  static getExperimentNameMap = (experiments) => {
+    // Input:
+    // [
+    //  { experiment_id: 1, name: '/1/bar' },
+    //  { experiment_id: 2, name: '/2/foo' },
+    //  { experiment_id: 3, name: '/3/bar' },
+    // ]
+    //
+    // Output:
+    // {
+    //   1: {name: '/1/bar', basename: 'bar (1)'},
+    //   2: {name: '/2/foo', basename: 'foo'},
+    //   3: {name: '/3/bar', basename: 'bar (2)'},
+    // }
+    const experimentsByBasename = {};
+    experiments.forEach((experiment) => {
+      const { name } = experiment;
+      const basename = name.split('/').pop();
+      experimentsByBasename[basename] = [...(experimentsByBasename[basename] || []), experiment];
+    });
+
+    const idToNames = {};
+    Object.entries(experimentsByBasename).forEach(([basename, exps]) => {
+      const isUnique = exps.length === 1;
+      exps.forEach(({ experiment_id, name }, index) => {
+        idToNames[experiment_id] = {
+          name,
+          basename: isUnique ? basename : `${basename} (${index + 1})`,
+        };
+      });
+    });
+
+    return idToNames;
+  };
 
   static isModelRegistryEnabled() {
     return true;

@@ -20,11 +20,12 @@ from sqlparse.tokens import Token as TokenType
 from mlflow.entities import RunInfo
 from mlflow.exceptions import MlflowException
 from mlflow.protos.databricks_pb2 import INVALID_PARAMETER_VALUE
+from mlflow.store.db.db_types import MYSQL, MSSQL
 
 import math
 
 
-class SearchUtils(object):
+class SearchUtils:
     LIKE_OPERATOR = "LIKE"
     ILIKE_OPERATOR = "ILIKE"
     ASC_OPERATOR = "asc"
@@ -89,8 +90,22 @@ class SearchUtils(object):
     }
 
     @classmethod
-    def get_sql_filter_ops(cls, column, operator):
-        sql_filter_ops = {"LIKE": column.like, "ILIKE": column.ilike}
+    def get_sql_filter_ops(cls, column, operator, dialect):
+        import sqlalchemy as sa
+
+        if dialect == MYSQL:
+
+            def like_op(value):
+                # Filter by `LIKE` ahead of `LIKE BINARY` for runtime performance
+                return sa.and_(
+                    column.like(value), column.op("LIKE BINARY", is_comparison=True)(value)
+                )
+
+        elif dialect == MSSQL:
+            like_op = column.collate("Japanese_Bushu_Kakusu_100_CS_AS_KS_WS").like
+        else:
+            like_op = column.like
+        sql_filter_ops = {"LIKE": like_op, "ILIKE": column.ilike}
         return sql_filter_ops[operator]
 
     @classmethod
@@ -174,7 +189,7 @@ class SearchUtils(object):
         if identifier_type == cls._METRIC_IDENTIFIER:
             if token.ttype not in cls.NUMERIC_VALUE_TYPES:
                 raise MlflowException(
-                    "Expected numeric value type for metric. " "Found {}".format(token.value),
+                    "Expected numeric value type for metric. Found {}".format(token.value),
                     error_code=INVALID_PARAMETER_VALUE,
                 )
             return token.value
@@ -420,7 +435,7 @@ class SearchUtils(object):
         parsed = cls.parse_search_filter(filter_string)
 
         def run_matches(run):
-            return all([cls._does_run_match_clause(run, s) for s in parsed])
+            return all(cls._does_run_match_clause(run, s) for s in parsed)
 
         return [run for run in runs if run_matches(run)]
 
@@ -447,7 +462,7 @@ class SearchUtils(object):
             token_value = cls.ORDER_BY_KEY_TIMESTAMP
         elif (
             statement.tokens[0].match(ttype=TokenType.Keyword, values=[cls.ORDER_BY_KEY_TIMESTAMP])
-            and all([token.is_whitespace for token in statement.tokens[1:-1]])
+            and all(token.is_whitespace for token in statement.tokens[1:-1])
             and statement.tokens[-1].ttype == TokenType.Keyword.Order
         ):
             token_value = cls.ORDER_BY_KEY_TIMESTAMP + " " + statement.tokens[-1].value
@@ -783,7 +798,7 @@ class SearchUtils(object):
         if len(invalids) > 0:
             invalid_clauses = ", ".join("'%s'" % token for token in invalids)
             raise MlflowException(
-                "Invalid clause(s) in filter string: %s. " "%s" % (invalid_clauses, expected),
+                "Invalid clause(s) in filter string: %s. %s" % (invalid_clauses, expected),
                 error_code=INVALID_PARAMETER_VALUE,
             )
         token_list = cls._process_statement_tokens(statement.tokens, filter_string)

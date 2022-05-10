@@ -23,21 +23,23 @@ from mlflow.utils.file_utils import TempDir
 from mlflow.utils.model_utils import _get_flavor_configuration
 from mlflow.tracking._model_registry import DEFAULT_AWAIT_MAX_SLEEP_SECONDS
 
-from tests.helper_functions import set_boto_credentials  # pylint: disable=unused-import
 from tests.helper_functions import mock_s3_bucket  # pylint: disable=unused-import
 from tests.helper_functions import (
     pyfunc_serve_and_score_model,
     _compare_conda_env_requirements,
     _assert_pip_requirements,
     _is_available_on_pypi,
+    _compare_logged_code_paths,
 )
 
-EXTRA_PYFUNC_SERVING_TEST_ARGS = [] if _is_available_on_pypi("xgboost") else ["--no-conda"]
+EXTRA_PYFUNC_SERVING_TEST_ARGS = (
+    [] if _is_available_on_pypi("xgboost") else ["--env-manager", "local"]
+)
 
 ModelWithData = namedtuple("ModelWithData", ["model", "inference_dataframe", "inference_dmatrix"])
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="module")
 def xgb_model():
     iris = datasets.load_iris()
     X = pd.DataFrame(
@@ -49,7 +51,7 @@ def xgb_model():
     return ModelWithData(model=model, inference_dataframe=X, inference_dmatrix=dtrain)
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="module")
 def xgb_sklearn_model():
     wine = datasets.load_wine()
     X = pd.DataFrame(wine.data, columns=wine.feature_names)
@@ -77,7 +79,7 @@ def test_model_save_load(xgb_model, model_path):
 
     mlflow.xgboost.save_model(xgb_model=model, path=model_path)
     reloaded_model = mlflow.xgboost.load_model(model_uri=model_path)
-    reloaded_pyfunc = pyfunc.load_pyfunc(model_uri=model_path)
+    reloaded_pyfunc = pyfunc.load_model(model_uri=model_path)
 
     np.testing.assert_array_almost_equal(
         model.predict(xgb_model.inference_dmatrix),
@@ -95,7 +97,7 @@ def test_sklearn_model_save_load(xgb_sklearn_model, model_path):
     model = xgb_sklearn_model.model
     mlflow.xgboost.save_model(xgb_model=model, path=model_path)
     reloaded_model = mlflow.xgboost.load_model(model_uri=model_path)
-    reloaded_pyfunc = pyfunc.load_pyfunc(model_uri=model_path)
+    reloaded_pyfunc = pyfunc.load_model(model_uri=model_path)
 
     np.testing.assert_array_almost_equal(
         model.predict(xgb_sklearn_model.inference_dataframe),
@@ -145,12 +147,10 @@ def test_model_load_from_remote_uri_succeeds(xgb_model, model_path, mock_s3_buck
 
 @pytest.mark.large
 def test_model_log(xgb_model, model_path):
-    old_uri = mlflow.get_tracking_uri()
     model = xgb_model.model
     with TempDir(chdr=True, remove_on_exit=True) as tmp:
         for should_start_run in [False, True]:
             try:
-                mlflow.set_tracking_uri("test")
                 if should_start_run:
                     mlflow.start_run()
 
@@ -158,12 +158,13 @@ def test_model_log(xgb_model, model_path):
                 conda_env = os.path.join(tmp.path(), "conda_env.yaml")
                 _mlflow_conda_env(conda_env, additional_pip_deps=["xgboost"])
 
-                mlflow.xgboost.log_model(
+                model_info = mlflow.xgboost.log_model(
                     xgb_model=model, artifact_path=artifact_path, conda_env=conda_env
                 )
                 model_uri = "runs:/{run_id}/{artifact_path}".format(
                     run_id=mlflow.active_run().info.run_id, artifact_path=artifact_path
                 )
+                assert model_info.model_uri == model_uri
 
                 reloaded_model = mlflow.xgboost.load_model(model_uri=model_uri)
                 np.testing.assert_array_almost_equal(
@@ -180,7 +181,6 @@ def test_model_log(xgb_model, model_path):
 
             finally:
                 mlflow.end_run()
-                mlflow.set_tracking_uri(old_uri)
 
 
 def test_log_model_calls_register_model(xgb_model):
@@ -453,7 +453,7 @@ def test_pyfunc_serve_and_score(xgb_model):
         content_type=pyfunc_scoring_server.CONTENT_TYPE_JSON_SPLIT_ORIENTED,
         extra_args=EXTRA_PYFUNC_SERVING_TEST_ARGS,
     )
-    scores = pd.read_json(resp.content, orient="records").values.squeeze()
+    scores = pd.read_json(resp.content.decode("utf-8"), orient="records").values.squeeze()
     np.testing.assert_array_almost_equal(scores, model.predict(inference_dmatrix))
 
 
@@ -478,7 +478,7 @@ def test_pyfunc_serve_and_score_sklearn(model):
         pyfunc_scoring_server.CONTENT_TYPE_JSON_SPLIT_ORIENTED,
         extra_args=EXTRA_PYFUNC_SERVING_TEST_ARGS,
     )
-    scores = pd.read_json(resp.content, orient="records").values.squeeze()
+    scores = pd.read_json(resp.content.decode("utf-8"), orient="records").values.squeeze()
     np.testing.assert_array_equal(scores, model.predict(X.head(3)))
 
 
@@ -526,3 +526,15 @@ def test_load_pyfunc_succeeds_for_older_models_with_pyfunc_data_field(xgb_model,
         reloaded_xgb.predict(xgb_model.inference_dmatrix),
         reloaded_pyfunc.predict(xgb_model.inference_dataframe),
     )
+
+
+def test_log_model_with_code_paths(xgb_model):
+    artifact_path = "model"
+    with mlflow.start_run(), mock.patch(
+        "mlflow.xgboost._add_code_from_conf_to_system_path"
+    ) as add_mock:
+        mlflow.xgboost.log_model(xgb_model.model, artifact_path, code_paths=[__file__])
+        model_uri = mlflow.get_artifact_uri(artifact_path)
+        _compare_logged_code_paths(__file__, model_uri, mlflow.xgboost.FLAVOR_NAME)
+        mlflow.xgboost.load_model(model_uri=model_uri)
+        add_mock.assert_called()

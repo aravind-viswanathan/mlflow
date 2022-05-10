@@ -1,5 +1,6 @@
 import os
 import logging
+import distutils
 
 from importlib.machinery import SourceFileLoader
 from setuptools import setup, find_packages
@@ -65,7 +66,7 @@ Server & UI. It also adds project backends such as Docker and Kubernetes among
 other capabilities.
 """
 CORE_REQUIREMENTS = SKINNY_REQUIREMENTS + [
-    "alembic<=1.4.1",
+    "alembic",
     # Required
     "docker>=4.0.0",
     "Flask",
@@ -85,6 +86,44 @@ CORE_REQUIREMENTS = SKINNY_REQUIREMENTS + [
 _is_mlflow_skinny = bool(os.environ.get(_MLFLOW_SKINNY_ENV_VAR))
 logging.debug("{} env var is set: {}".format(_MLFLOW_SKINNY_ENV_VAR, _is_mlflow_skinny))
 
+
+class ListDependencies(distutils.cmd.Command):
+    # `python setup.py <command name>` prints out "running <command name>" by default.
+    # This logging message must be hidden by specifying `--quiet` (or `-q`) when piping the output
+    # of this command to `pip install`.
+    description = "List mlflow dependencies"
+    user_options = [
+        ("skinny", None, "List mlflow-skinny dependencies"),
+    ]
+
+    def initialize_options(self):
+        self.skinny = False
+
+    def finalize_options(self):
+        pass
+
+    def run(self):
+        dependencies = SKINNY_REQUIREMENTS if self.skinny else CORE_REQUIREMENTS
+        print("\n".join(dependencies))
+
+
+MINIMUM_SUPPORTED_PYTHON_VERSION = "3.7"
+
+
+class MinPythonVersion(distutils.cmd.Command):
+    description = "Print out the minimum supported Python version"
+    user_options = []
+
+    def initialize_options(self):
+        pass
+
+    def finalize_options(self):
+        pass
+
+    def run(self):
+        print(MINIMUM_SUPPORTED_PYTHON_VERSION)
+
+
 setup(
     name="mlflow" if not _is_mlflow_skinny else "mlflow-skinny",
     version=version,
@@ -103,7 +142,7 @@ setup(
             # Required to log artifacts and models to AWS S3 artifact locations
             "boto3",
             # Required to log artifacts and models to GCS artifact locations
-            "google-cloud-storage",
+            "google-cloud-storage>=1.30.0",
             "azureml-core>=1.2.0",
             # Required to log artifacts to SFTP artifact locations
             "pysftp",
@@ -113,6 +152,7 @@ setup(
             # Required to serve models through MLServer
             "mlserver>=0.5.3",
             "mlserver-mlflow>=0.5.3",
+            "virtualenv",
         ],
         "sqlserver": ["mlflow-dbstore"],
         "aliyun-oss": ["aliyunstoreplugin"],
@@ -121,6 +161,10 @@ setup(
         [console_scripts]
         mlflow=mlflow.cli:cli
     """,
+    cmdclass={
+        "dependencies": ListDependencies,
+        "min_python_version": MinPythonVersion,
+    },
     zip_safe=False,
     author="Databricks",
     description="MLflow: A Platform for ML Development and Productionization",
@@ -129,10 +173,13 @@ setup(
     else open("README_SKINNY.rst").read() + open("README.rst").read(),
     long_description_content_type="text/x-rst",
     license="Apache License 2.0",
-    classifiers=["Intended Audience :: Developers", "Programming Language :: Python :: 3.6"],
+    classifiers=[
+        "Intended Audience :: Developers",
+        f"Programming Language :: Python :: {MINIMUM_SUPPORTED_PYTHON_VERSION}",
+    ],
     keywords="ml ai databricks",
     url="https://mlflow.org/",
-    python_requires=">=3.6",
+    python_requires=f">={MINIMUM_SUPPORTED_PYTHON_VERSION}",
     project_urls={
         "Bug Tracker": "https://github.com/mlflow/mlflow/issues",
         "Documentation": "https://mlflow.org/docs/latest/index.html",

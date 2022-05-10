@@ -13,6 +13,7 @@ import mlflow
 import uuid
 import json
 import pandas as pd
+from concurrent.futures import ThreadPoolExecutor
 from unittest import mock
 
 import mlflow.db
@@ -29,9 +30,9 @@ from mlflow.entities import (
 )
 from mlflow.protos.databricks_pb2 import (
     ErrorCode,
+    BAD_REQUEST,
     RESOURCE_DOES_NOT_EXIST,
     INVALID_PARAMETER_VALUE,
-    INTERNAL_ERROR,
 )
 from mlflow.store.tracking import SEARCH_MAX_RESULTS_DEFAULT
 from mlflow.store.db.utils import (
@@ -39,7 +40,7 @@ from mlflow.store.db.utils import (
     _get_latest_schema_revision,
 )
 from mlflow.store.tracking.dbmodels import models
-from mlflow.store.db.db_types import MYSQL, MSSQL
+from mlflow.store.db.db_types import SQLITE, POSTGRES, MYSQL, MSSQL
 from mlflow import entities
 from mlflow.exceptions import MlflowException
 from mlflow.store.tracking.sqlalchemy_store import SqlAlchemyStore, _get_orderby_clauses
@@ -47,11 +48,23 @@ from mlflow.utils import mlflow_tags
 from mlflow.utils.file_utils import TempDir
 from mlflow.utils.uri import extract_db_type_from_uri
 from mlflow.store.tracking.dbmodels.initial_models import Base as InitialBase
+from mlflow.tracking._tracking_service.utils import _TRACKING_URI_ENV_VAR
+from mlflow.store.tracking.dbmodels.models import (
+    SqlParam,
+    SqlTag,
+    SqlMetric,
+    SqlLatestMetric,
+    SqlRun,
+    SqlExperimentTag,
+    SqlExperiment,
+)
 from tests.integration.utils import invoke_cli_runner
 from tests.store.tracking import AbstractStoreTest
 
 DB_URI = "sqlite:///"
 ARTIFACT_URI = "artifact_folder"
+
+pytestmark = pytest.mark.notrackingurimock
 
 
 class TestParseDbUri(unittest.TestCase):
@@ -114,27 +127,64 @@ class TestParseDbUri(unittest.TestCase):
         )
 
 
-class TestSqlAlchemyStoreSqlite(unittest.TestCase, AbstractStoreTest):
+class TestSqlAlchemyStore(unittest.TestCase, AbstractStoreTest):
     def _get_store(self, db_uri=""):
         return SqlAlchemyStore(db_uri, ARTIFACT_URI)
 
     def create_test_run(self):
         return self._run_factory()
 
+    def _setup_db_uri(self):
+        if _TRACKING_URI_ENV_VAR in os.environ:
+            self.temp_dbfile = None
+            self.db_url = os.getenv(_TRACKING_URI_ENV_VAR)
+        else:
+            fd, self.temp_dbfile = tempfile.mkstemp()
+            # Close handle immediately so that we can remove the file later on in Windows
+            os.close(fd)
+            self.db_url = "%s%s" % (DB_URI, self.temp_dbfile)
+
     def setUp(self):
-        self.maxDiff = None  # print all differences on assert failures
-        fd, self.temp_dbfile = tempfile.mkstemp()
-        # Close handle immediately so that we can remove the file later on in Windows
-        os.close(fd)
-        self.db_url = "%s%s" % (DB_URI, self.temp_dbfile)
+        self._setup_db_uri()
         self.store = self._get_store(self.db_url)
 
     def get_store(self):
         return self.store
 
+    def _get_query_to_reset_experiment_id(self):
+        dialect = self.store._get_dialect()
+        if dialect == POSTGRES:
+            return "ALTER SEQUENCE experiments_experiment_id_seq RESTART WITH 1"
+        elif dialect == MYSQL:
+            return "ALTER TABLE experiments AUTO_INCREMENT = 1"
+        elif dialect == MSSQL:
+            return "DBCC CHECKIDENT (experiments, RESEED, 0)"
+        elif dialect == SQLITE:
+            # In SQLite, deleting all experiments resets experiment_id
+            return None
+        raise ValueError(f"Invalid dialect: {dialect}")
+
     def tearDown(self):
-        mlflow.store.db.base_sql_model.Base.metadata.drop_all(self.store.engine)
-        os.remove(self.temp_dbfile)
+        if self.temp_dbfile:
+            os.remove(self.temp_dbfile)
+        else:
+            with self.store.ManagedSessionMaker() as session:
+                # Delete all rows in all tables
+                for model in (
+                    SqlParam,
+                    SqlMetric,
+                    SqlLatestMetric,
+                    SqlTag,
+                    SqlRun,
+                    SqlExperimentTag,
+                    SqlExperiment,
+                ):
+                    session.query(model).delete()
+
+                # Reset experiment_id to start at 1
+                reset_experiment_id = self._get_query_to_reset_experiment_id()
+                if reset_experiment_id:
+                    session.execute(reset_experiment_id)
         shutil.rmtree(ARTIFACT_URI)
 
     def _experiment_factory(self, names):
@@ -488,12 +538,11 @@ class TestSqlAlchemyStoreSqlite(unittest.TestCase, AbstractStoreTest):
         # exceptions, including IntegrityError (sqlite) and FlushError (MysQL).
         # Therefore, we check for the more generic 'SQLAlchemyError'
         with self.assertRaises(MlflowException) as exception_context:
-            warnings.simplefilter("ignore")
-            with self.store.ManagedSessionMaker() as session, warnings.catch_warnings():
+            with self.store.ManagedSessionMaker() as session:
                 run = models.SqlRun()
                 session.add(run)
                 warnings.resetwarnings()
-        assert exception_context.exception.error_code == ErrorCode.Name(INTERNAL_ERROR)
+        assert exception_context.exception.error_code == ErrorCode.Name(BAD_REQUEST)
 
     def test_run_data_model(self):
         with self.store.ManagedSessionMaker() as session:
@@ -686,6 +735,63 @@ class TestSqlAlchemyStoreSqlite(unittest.TestCase, AbstractStoreTest):
             self.assertTrue(run.data.metrics["PosInf"] == 1.7976931348623157e308)
             self.assertTrue(run.data.metrics["NegInf"] == -1.7976931348623157e308)
 
+    def test_log_metric_concurrent_logging_succeeds(self):
+        """
+        Verifies that concurrent logging succeeds without deadlock, which has been an issue
+        in previous MLflow releases
+        """
+        experiment_id = self._experiment_factory("concurrency_exp")
+        run_config = self._get_run_configs(experiment_id=experiment_id)
+        run1 = self._run_factory(run_config)
+        run2 = self._run_factory(run_config)
+
+        def log_metrics(run):
+            for metric_val in range(100):
+                self.store.log_metric(
+                    run.info.run_id, Metric("metric_key", metric_val, int(1000 * time.time()), 0)
+                )
+            for batch_idx in range(5):
+                self.store.log_batch(
+                    run.info.run_id,
+                    metrics=[
+                        Metric(
+                            f"metric_batch_{batch_idx}",
+                            (batch_idx * 100) + val_offset,
+                            int(1000 * time.time()),
+                            0,
+                        )
+                        for val_offset in range(100)
+                    ],
+                    params=[],
+                    tags=[],
+                )
+            for metric_val in range(100):
+                self.store.log_metric(
+                    run.info.run_id, Metric("metric_key", metric_val, int(1000 * time.time()), 0)
+                )
+            return "success"
+
+        log_metrics_futures = []
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            # Log metrics to two runs across four threads
+            log_metrics_futures = [
+                executor.submit(log_metrics, run) for run in [run1, run2, run1, run2]
+            ]
+
+        for future in log_metrics_futures:
+            assert future.result() == "success"
+
+        for run in [run1, run2, run1, run2]:
+            # We visit each run twice, logging 100 metric entries for 6 metric names; the same entry
+            # may be written multiple times concurrently; we assert that at least 100 metric entries
+            # are present because at least 100 unique entries must have been written
+            assert len(self.store.get_metric_history(run.info.run_id, "metric_key")) >= 100
+            for batch_idx in range(5):
+                assert (
+                    len(self.store.get_metric_history(run.info.run_id, f"metric_batch_{batch_idx}"))
+                    >= 100
+                )
+
     def test_log_metric_allows_multiple_values_at_same_ts_and_run_data_uses_max_ts_value(self):
         run = self._run_factory()
         run_id = run.info.run_id
@@ -725,8 +831,7 @@ class TestSqlAlchemyStoreSqlite(unittest.TestCase, AbstractStoreTest):
         tval = None
         metric = entities.Metric(tkey, tval, int(1000 * time.time()), 0)
 
-        warnings.simplefilter("ignore")
-        with self.assertRaises(MlflowException) as exception_context, warnings.catch_warnings():
+        with self.assertRaises(MlflowException) as exception_context:
             self.store.log_metric(run.info.run_id, metric)
             warnings.resetwarnings()
         assert exception_context.exception.error_code == ErrorCode.Name(INVALID_PARAMETER_VALUE)
@@ -782,7 +887,7 @@ class TestSqlAlchemyStoreSqlite(unittest.TestCase, AbstractStoreTest):
 
         with self.assertRaises(MlflowException) as exception_context:
             self.store.log_param(run.info.run_id, param)
-        assert exception_context.exception.error_code == ErrorCode.Name(INTERNAL_ERROR)
+        assert exception_context.exception.error_code == ErrorCode.Name(BAD_REQUEST)
 
     def test_set_experiment_tag(self):
         exp_id = self._experiment_factory("setExperimentTagExp")
@@ -1063,42 +1168,42 @@ class TestSqlAlchemyStoreSqlite(unittest.TestCase, AbstractStoreTest):
         # the expected order in ascending sort is :
         # inf > number > -inf > None > nan
         for names in zip(
-            ["nan", None, "inf", "-inf", "-1000", "0", "0", "1000"],
+            [None, "nan", "inf", "-inf", "-1000", "0", "0", "1000"],
             ["1", "2", "3", "4", "5", "6", "7", "8"],
         ):
             create_and_log_run(names)
 
         # asc/asc
         self.assertListEqual(
-            ["-inf/4", "-1000/5", "0/6", "0/7", "1000/8", "inf/3", "None/2", "nan/1"],
+            ["-inf/4", "-1000/5", "0/6", "0/7", "1000/8", "inf/3", "nan/2", "None/1"],
             self.get_ordered_runs(["metrics.x asc", "metrics.y asc"], experiment_id),
         )
 
         self.assertListEqual(
-            ["-inf/4", "-1000/5", "0/6", "0/7", "1000/8", "inf/3", "None/2", "nan/1"],
+            ["-inf/4", "-1000/5", "0/6", "0/7", "1000/8", "inf/3", "nan/2", "None/1"],
             self.get_ordered_runs(["metrics.x asc", "tag.metric asc"], experiment_id),
         )
 
         # asc/desc
         self.assertListEqual(
-            ["-inf/4", "-1000/5", "0/7", "0/6", "1000/8", "inf/3", "None/2", "nan/1"],
+            ["-inf/4", "-1000/5", "0/7", "0/6", "1000/8", "inf/3", "nan/2", "None/1"],
             self.get_ordered_runs(["metrics.x asc", "metrics.y desc"], experiment_id),
         )
 
         self.assertListEqual(
-            ["-inf/4", "-1000/5", "0/7", "0/6", "1000/8", "inf/3", "None/2", "nan/1"],
+            ["-inf/4", "-1000/5", "0/7", "0/6", "1000/8", "inf/3", "nan/2", "None/1"],
             self.get_ordered_runs(["metrics.x asc", "tag.metric desc"], experiment_id),
         )
 
         # desc / asc
         self.assertListEqual(
-            ["inf/3", "1000/8", "0/6", "0/7", "-1000/5", "-inf/4", "nan/1", "None/2"],
+            ["inf/3", "1000/8", "0/6", "0/7", "-1000/5", "-inf/4", "nan/2", "None/1"],
             self.get_ordered_runs(["metrics.x desc", "metrics.y asc"], experiment_id),
         )
 
         # desc / desc
         self.assertListEqual(
-            ["inf/3", "1000/8", "0/7", "0/6", "-1000/5", "-inf/4", "nan/1", "None/2"],
+            ["inf/3", "1000/8", "0/7", "0/6", "-1000/5", "-inf/4", "nan/2", "None/1"],
             self.get_ordered_runs(["metrics.x desc", "param.metric desc"], experiment_id),
         )
 
@@ -1282,7 +1387,7 @@ class TestSqlAlchemyStoreSqlite(unittest.TestCase, AbstractStoreTest):
             [r2],
             self._search(
                 experiment_id,
-                filter_string="tags.generic_2 ILIKE '%Other%' " "and tags.generic_tag = 'p_val'",
+                filter_string="tags.generic_2 ILIKE '%Other%' and tags.generic_tag = 'p_val'",
             ),
         )
         self.assertCountEqual(
@@ -1518,6 +1623,10 @@ class TestSqlAlchemyStoreSqlite(unittest.TestCase, AbstractStoreTest):
 
         assert runs[:1000] == self._search(exp)
         for n in [0, 1, 2, 4, 8, 10, 20, 50, 100, 500, 1000, 1200, 2000]:
+            if n == 0 and self.store._get_dialect() == MSSQL:
+                # In SQL server, `max_results = 0` results in the following error:
+                # The number of rows provided for a FETCH clause must be greater then zero.
+                continue
             assert runs[: min(1200, n)] == self._search(exp, max_results=n)
 
         with self.assertRaises(MlflowException) as e:
@@ -1535,6 +1644,10 @@ class TestSqlAlchemyStoreSqlite(unittest.TestCase, AbstractStoreTest):
             ]
         )
         for n in [0, 1, 2, 4, 8, 10, 20]:
+            if n == 0 and self.store._get_dialect() == MSSQL:
+                # In SQL server, `max_results = 0` results in the following error:
+                # The number of rows provided for a FETCH clause must be greater then zero.
+                continue
             assert runs[: min(10, n)] == self._search(exp, max_results=n)
 
     def test_search_runs_pagination(self):
@@ -1608,7 +1721,9 @@ class TestSqlAlchemyStoreSqlite(unittest.TestCase, AbstractStoreTest):
             self.store.log_batch(
                 run.info.run_id, metrics=[metric], params=[overwrite_param], tags=[tag]
             )
-        self.assertIn("Changing param values is not allowed. Param with key=", e.exception.message)
+        self.assertIn(
+            "Changing param values is not allowed. Params were already logged=", e.exception.message
+        )
         assert e.exception.error_code == ErrorCode.Name(INVALID_PARAMETER_VALUE)
         self._verify_logged(self.store, run.info.run_id, metrics=[], params=[param], tags=[])
 
@@ -1624,9 +1739,9 @@ class TestSqlAlchemyStoreSqlite(unittest.TestCase, AbstractStoreTest):
             self.store.log_batch(
                 run.info.run_id, metrics=[metric], params=[param0, param1], tags=[tag]
             )
-        self.assertIn("Changing param values is not allowed. Param with key=", e.exception.message)
+        self.assertIn("Duplicate parameter keys have been submitted:", e.exception.message)
         assert e.exception.error_code == ErrorCode.Name(INVALID_PARAMETER_VALUE)
-        self._verify_logged(self.store, run.info.run_id, metrics=[], params=[param0], tags=[])
+        self._verify_logged(self.store, run.info.run_id, metrics=[], params=[], tags=[])
 
     def test_log_batch_accepts_empty_payload(self):
         run = self._run_factory()
@@ -1642,9 +1757,9 @@ class TestSqlAlchemyStoreSqlite(unittest.TestCase, AbstractStoreTest):
             raise Exception("Some internal error")
 
         package = "mlflow.store.tracking.sqlalchemy_store.SqlAlchemyStore"
-        with mock.patch(package + ".log_metric") as metric_mock, mock.patch(
-            package + ".log_param"
-        ) as param_mock, mock.patch(package + ".set_tag") as tags_mock:
+        with mock.patch(package + "._log_metrics") as metric_mock, mock.patch(
+            package + "._log_params"
+        ) as param_mock, mock.patch(package + "._set_tags") as tags_mock:
             metric_mock.side_effect = _raise_exception_fn
             param_mock.side_effect = _raise_exception_fn
             tags_mock.side_effect = _raise_exception_fn
@@ -1701,6 +1816,35 @@ class TestSqlAlchemyStoreSqlite(unittest.TestCase, AbstractStoreTest):
         self.store.log_batch(run.info.run_id, metrics=[], params=[], tags=tags)
         self._verify_logged(self.store, run.info.run_id, metrics=[], params=[], tags=[tags[-1]])
 
+    def test_log_batch_metrics(self):
+        run = self._run_factory()
+
+        tkey = "blahmetric"
+        tval = 100.0
+        metric = entities.Metric(tkey, tval, int(1000 * time.time()), 0)
+        metric2 = entities.Metric(tkey, tval, int(1000 * time.time()) + 2, 0)
+        nan_metric = entities.Metric("NaN", float("nan"), 0, 0)
+        pos_inf_metric = entities.Metric("PosInf", float("inf"), 0, 0)
+        neg_inf_metric = entities.Metric("NegInf", -float("inf"), 0, 0)
+
+        # duplicate metric and metric2 values should be eliminated
+        metrics = [metric, metric2, nan_metric, pos_inf_metric, neg_inf_metric, metric, metric2]
+        self.store._log_metrics(run.info.run_id, metrics)
+
+        run = self.store.get_run(run.info.run_id)
+        self.assertTrue(tkey in run.data.metrics and run.data.metrics[tkey] == tval)
+
+        # SQL store _get_run method returns full history of recorded metrics.
+        # Should return duplicates as well
+        # MLflow RunData contains only the last reported values for metrics.
+        with self.store.ManagedSessionMaker() as session:
+            sql_run_metrics = self.store._get_run(session, run.info.run_id).metrics
+            self.assertEqual(5, len(sql_run_metrics))
+            self.assertEqual(4, len(run.data.metrics))
+            self.assertTrue(math.isnan(run.data.metrics["NaN"]))
+            self.assertTrue(run.data.metrics["PosInf"] == 1.7976931348623157e308)
+            self.assertTrue(run.data.metrics["NegInf"] == -1.7976931348623157e308)
+
     def test_log_batch_same_metric_repeated_single_req(self):
         run = self._run_factory()
         metric0 = Metric(key="metric-key", value=1, timestamp=2, step=0)
@@ -1720,6 +1864,36 @@ class TestSqlAlchemyStoreSqlite(unittest.TestCase, AbstractStoreTest):
         self._verify_logged(
             self.store, run.info.run_id, params=[], metrics=[metric0, metric1], tags=[]
         )
+
+    def test_log_batch_same_metrics_repeated_multiple_reqs(self):
+        run = self._run_factory()
+        metric0 = Metric(key="metric-key", value=1, timestamp=2, step=0)
+        metric1 = Metric(key="metric-key", value=2, timestamp=3, step=0)
+        self.store.log_batch(run.info.run_id, params=[], metrics=[metric0, metric1], tags=[])
+        self._verify_logged(
+            self.store, run.info.run_id, params=[], metrics=[metric0, metric1], tags=[]
+        )
+        self.store.log_batch(run.info.run_id, params=[], metrics=[metric0, metric1], tags=[])
+        self._verify_logged(
+            self.store, run.info.run_id, params=[], metrics=[metric0, metric1], tags=[]
+        )
+
+    def test_log_batch_null_metrics(self):
+        run = self._run_factory()
+
+        tkey = "blahmetric"
+        tval = None
+        metric_1 = entities.Metric(tkey, tval, int(1000 * time.time()), 0)
+
+        tkey = "blahmetric2"
+        tval = None
+        metric_2 = entities.Metric(tkey, tval, int(1000 * time.time()), 0)
+
+        metrics = [metric_1, metric_2]
+
+        with self.assertRaises(MlflowException) as exception_context:
+            self.store.log_batch(run.info.run_id, metrics=metrics, params=[], tags=[])
+        assert exception_context.exception.error_code == ErrorCode.Name(INVALID_PARAMETER_VALUE)
 
     def test_upgrade_cli_idempotence(self):
         # Repeatedly run `mlflow db upgrade` against our database, verifying that the command
@@ -1754,18 +1928,22 @@ class TestSqlAlchemyStoreSqlite(unittest.TestCase, AbstractStoreTest):
         This JSON dump can be replicated by installing MLflow version 1.2.0 and executing the
         following code from the directory containing this test suite:
 
-        >>> import json
-        >>> import mlflow
-        >>> from mlflow.tracking.client import MlflowClient
-        >>> mlflow.set_tracking_uri(
-        ...     "sqlite:///../../resources/db/db_version_7ac759974ad8_with_metrics.sql")
-        >>> client = MlflowClient()
-        >>> summary_metrics = {
-        ...     run.info.run_id: run.data.metrics for run
-        ...     in client.search_runs(experiment_ids="0")
-        ... }
-        >>> with open("dump.json", "w") as dump_file:
-        >>>     json.dump(summary_metrics, dump_file, indent=4)
+        .. code-block:: python
+
+          import json
+          import mlflow
+          from mlflow.tracking.client import MlflowClient
+
+          mlflow.set_tracking_uri(
+              "sqlite:///../../resources/db/db_version_7ac759974ad8_with_metrics.sql")
+          client = MlflowClient()
+          summary_metrics = {
+              run.info.run_id: run.data.metrics for run
+              in client.search_runs(experiment_ids="0")
+          }
+          with open("dump.json", "w") as dump_file:
+              json.dump(summary_metrics, dump_file, indent=4)
+
         """
         current_dir = os.path.dirname(os.path.abspath(__file__))
         db_resources_path = os.path.normpath(
@@ -1815,7 +1993,7 @@ class TestSqlAlchemyStoreSqlite(unittest.TestCase, AbstractStoreTest):
                     "value": i,
                     "timestamp": i * 2,
                     "step": i * 3,
-                    "is_nan": 0,
+                    "is_nan": False,
                     "run_uuid": run_id,
                 }
                 metrics_list.append(metric)
@@ -1837,7 +2015,7 @@ class TestSqlAlchemyStoreSqlite(unittest.TestCase, AbstractStoreTest):
                     "value": current_run,
                     "timestamp": 100 * 2,
                     "step": 100 * 3,
-                    "is_nan": 0,
+                    "is_nan": False,
                     "run_uuid": run_id,
                 }
             )
@@ -1939,23 +2117,18 @@ def test_sqlalchemy_store_can_be_initialized_when_default_experiment_has_been_de
     SqlAlchemyStore(db_uri, ARTIFACT_URI)
 
 
-class TestSqlAlchemyStoreSqliteMigratedDB(TestSqlAlchemyStoreSqlite):
+class TestSqlAlchemyStoreMigratedDB(TestSqlAlchemyStore):
     """
     Test case where user has an existing DB with schema generated before MLflow 1.0,
     then migrates their DB.
     """
 
     def setUp(self):
-        fd, self.temp_dbfile = tempfile.mkstemp()
-        os.close(fd)
-        self.db_url = "%s%s" % (DB_URI, self.temp_dbfile)
+        super()._setup_db_uri()
         engine = sqlalchemy.create_engine(self.db_url)
         InitialBase.metadata.create_all(engine)
         invoke_cli_runner(mlflow.db.commands, ["upgrade", self.db_url])
         self.store = SqlAlchemyStore(self.db_url, ARTIFACT_URI)
-
-    def tearDown(self):
-        os.remove(self.temp_dbfile)
 
 
 @mock.patch("sqlalchemy.orm.session.Session", spec=True)
@@ -1997,7 +2170,7 @@ def test_get_attribute_name():
 
     # we want this to break if a searchable or orderable attribute has been added
     # and not referred to in this test
-    # searchable attibutes are also orderable
+    # searchable attributes are also orderable
     assert len(entities.RunInfo.get_orderable_attributes()) == 4
 
 
@@ -2005,11 +2178,11 @@ def test_get_orderby_clauses():
     store = SqlAlchemyStore("sqlite:///:memory:", ARTIFACT_URI)
     with store.ManagedSessionMaker() as session:
         # test that ['runs.start_time DESC', 'SqlRun.run_uuid'] is returned by default
-        parsed = [str(x) for x in _get_orderby_clauses([], session)[0]]
+        parsed = [str(x) for x in _get_orderby_clauses([], session)[1]]
         assert parsed == ["runs.start_time DESC", "SqlRun.run_uuid"]
 
         # test that the given 'start_time' replaces the default one ('runs.start_time DESC')
-        parsed = [str(x) for x in _get_orderby_clauses(["attribute.start_time ASC"], session)[0]]
+        parsed = [str(x) for x in _get_orderby_clauses(["attribute.start_time ASC"], session)[1]]
         assert "SqlRun.start_time" in parsed
         assert "SqlRun.start_time DESC" not in parsed
 
@@ -2030,7 +2203,11 @@ def test_get_orderby_clauses():
         # test that an exception is NOT raised when key types are different
         _get_orderby_clauses(["param.a", "metric.a", "tag.a"], session)
 
+        select_clause, parsed, _ = _get_orderby_clauses(["metric.a"], session)
+        select_clause = [str(x) for x in select_clause]
+        parsed = [str(x) for x in parsed]
         # test that "=" is used rather than "is" when comparing to True
-        parsed = [str(x) for x in _get_orderby_clauses(["metric.a"], session)[0]]
-        assert "is_nan = true" in parsed[0]
-        assert "value IS NULL" in parsed[0]
+        assert "is_nan = true" in select_clause[0]
+        assert "value IS NULL" in select_clause[0]
+        # test that clause name is in parsed
+        assert "clause_1" in parsed[0]

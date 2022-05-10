@@ -13,6 +13,7 @@ import {
   METRICS_PLOT_POLLING_INTERVAL_MS,
   METRICS_PLOT_HANGING_RUN_THRESHOLD_MS,
 } from './MetricsPlotPanel';
+import MetricsSummaryTable from './MetricsSummaryTable';
 import { X_AXIS_RELATIVE, X_AXIS_STEP, X_AXIS_WALL } from './MetricsPlotControls';
 import Utils from '../../common/utils/Utils';
 import { mountWithIntl } from '../../common/utils/TestUtils';
@@ -23,13 +24,14 @@ describe('unit tests', () => {
   let instance;
   let minimalPropsForLineChart;
   let minimalPropsForBarChart;
+  let minimalStore;
   let getMetricHistoryApi;
   let getRunApi;
 
   beforeEach(() => {
     const location = {
       search:
-        '?runs=["runUuid1","runUuid2"]&experiment=0' +
+        '?runs=["runUuid1","runUuid2"]&experiments=["1"]' +
         '&plot_metric_keys=["metric_1","metric_2"]&plot_layout={}',
     };
     const history = {
@@ -41,7 +43,7 @@ describe('unit tests', () => {
     getRunApi = jest.fn(() => Promise.resolve());
     const now = new Date().getTime();
     minimalPropsForLineChart = {
-      experimentId: '1',
+      experimentIds: ['1'],
       runUuids: ['runUuid1', 'runUuid2'],
       completedRunUuids: ['runUuid1', 'runUuid2'],
       metricKey: 'metric_1',
@@ -106,7 +108,7 @@ describe('unit tests', () => {
     };
 
     minimalPropsForBarChart = {
-      experimentId: '1',
+      experimentIds: ['1'],
       runUuids: ['runUuid1', 'runUuid2'],
       completedRunUuids: ['runUuid1', 'runUuid2'],
       metricKey: 'metric_1',
@@ -157,6 +159,16 @@ describe('unit tests', () => {
       runDisplayNames: ['runDisplayName1', 'runDisplayName2'],
       deselectedCurves: [],
     };
+
+    const mockStore = configureStore([thunk, promiseMiddleware()]);
+    minimalStore = mockStore({
+      entities: {
+        runInfosByUuid: {},
+        latestMetricsByRunUuid: {},
+        minMetricsByRunUuid: {},
+        maxMetricsByRunUuid: {},
+      },
+    });
   });
 
   test('should render with minimal props without exploding', () => {
@@ -377,7 +389,7 @@ describe('unit tests', () => {
       ],
     };
     const props = {
-      experimentId: '1',
+      experimentIds: ['1'],
       visible: true,
       x: 1,
       y: 1,
@@ -407,16 +419,16 @@ describe('unit tests', () => {
       expect(popover.props().x).toEqual(props.x);
       expect(popover.props().y).toEqual(props.y);
       expect(popover.props().visible).toEqual(props.visible);
-      expect(popover.props().experimentId).toEqual(props.experimentId);
+      expect(popover.props().experimentIds).toEqual(props.experimentId);
       expect(popover.props().runItems).toEqual(props.runItems);
       done();
     }, 1000);
   });
+
   test('should render the number of completed runs correctly', () => {
     const mountWithProps = (props) => {
-      const mockStore = configureStore([thunk, promiseMiddleware()]);
       return mountWithIntl(
-        <Provider store={mockStore({})}>
+        <Provider store={minimalStore}>
           <BrowserRouter>
             <MetricsPlotPanel {...props} />
           </BrowserRouter>
@@ -444,6 +456,28 @@ describe('unit tests', () => {
     });
     wrapper.update();
     expect(wrapper.find(Progress).text()).toContain('2/2');
+  });
+
+  test('should render the metrics summary table correctly', () => {
+    const mountWithProps = (props) => {
+      return mountWithIntl(
+        <Provider store={minimalStore}>
+          <BrowserRouter>
+            <MetricsPlotPanel {...props} />
+          </BrowserRouter>
+        </Provider>,
+      );
+    };
+    wrapper = mountWithProps({
+      ...minimalPropsForLineChart,
+    });
+    wrapper.update();
+
+    const summaryTable = wrapper.find(MetricsSummaryTable);
+    expect(summaryTable.length).toBe(1);
+    expect(summaryTable.props().runUuids).toEqual(minimalPropsForLineChart.runUuids);
+    // Selected metric keys are set by location.search
+    expect(summaryTable.props().metricKeys).toEqual(['metric_1', 'metric_2']);
   });
 
   test('should not poll if all runs already completed', () => {

@@ -8,6 +8,7 @@ from unittest import mock
 import os
 import sys
 import pytest
+import logging
 import shutil
 import tempfile
 
@@ -23,6 +24,8 @@ from tests.tracking.integration_test_utils import _await_server_down_or_die, _in
 SUITE_ROOT_DIR = tempfile.mkdtemp("test_rest_tracking")
 # Root directory for all artifact stores created during this suite
 SUITE_ARTIFACT_ROOT_DIR = tempfile.mkdtemp(suffix="artifacts", dir=SUITE_ROOT_DIR)
+
+_logger = logging.getLogger(__name__)
 
 
 def _get_sqlite_uri():
@@ -65,8 +68,8 @@ def server_urls():
     """
     yield
     for server_url, process in BACKEND_URI_TO_SERVER_URL_AND_PROC.values():
-        print("Terminating server at %s..." % (server_url))
-        print("type = ", type(process))
+        _logger.info(f"Terminating server at {server_url}...")
+        _logger.info(f"type = {type(process)}")
         process.terminate()
         _await_server_down_or_die(process)
     shutil.rmtree(SUITE_ROOT_DIR)
@@ -489,8 +492,8 @@ def test_latest_models(mlflow_client, backend_store_uri):
     assert {"None": "7"} == get_latest(["None"])
     assert {"Staging": "6"} == get_latest(["Staging"])
     assert {"None": "7", "Staging": "6"} == get_latest(["None", "Staging"])
-    assert {"Production": "4", "Staging": "6"} == get_latest(None)
-    assert {"Production": "4", "Staging": "6"} == get_latest([])
+    assert {"Production": "4", "Staging": "6", "Archived": "3", "None": "7"} == get_latest(None)
+    assert {"Production": "4", "Staging": "6", "Archived": "3", "None": "7"} == get_latest([])
 
 
 def test_delete_model_version_flow(mlflow_client, backend_store_uri):

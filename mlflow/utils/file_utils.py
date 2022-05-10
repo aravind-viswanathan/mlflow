@@ -14,6 +14,8 @@ import urllib.request
 from urllib.parse import unquote
 from urllib.request import pathname2url
 
+import atexit
+
 import yaml
 
 try:
@@ -24,6 +26,7 @@ except ImportError:
 from mlflow.entities import FileInfo
 from mlflow.exceptions import MissingConfigException
 from mlflow.utils.rest_utils import cloud_storage_http_request, augmented_raise_for_status
+from mlflow.utils.process import cache_return_value_per_process
 
 ENCODING = "utf-8"
 
@@ -181,7 +184,7 @@ def read_yaml(root, file_name):
         raise e
 
 
-class TempDir(object):
+class TempDir:
     def __init__(self, chdr=False, remove_on_exit=True):
         self._dir = None
         self._path = None
@@ -287,7 +290,7 @@ def make_tarfile(output_filename, source_dir, archive_name, custom_filter=None):
         tar_info.mtime = 0
         return tar_info if custom_filter is None else custom_filter(tar_info)
 
-    unzipped_filename = tempfile.mktemp()
+    unzipped_file_handle, unzipped_filename = tempfile.mkstemp()
     try:
         with tarfile.open(unzipped_filename, "w") as tar:
             tar.add(source_dir, arcname=archive_name, filter=_filter_timestamps)
@@ -298,7 +301,7 @@ def make_tarfile(output_filename, source_dir, archive_name, custom_filter=None):
         ) as gzipped_tar, open(unzipped_filename, "rb") as tar:
             gzipped_tar.write(tar.read())
     finally:
-        os.remove(unzipped_filename)
+        os.close(unzipped_file_handle)
 
 
 def _copy_project(src_path, dst_path=""):
@@ -483,3 +486,56 @@ def _handle_readonly_on_windows(func, path, exc_info):
         raise exc_value
     os.chmod(path, stat.S_IWRITE)
     func(path)
+
+
+@cache_return_value_per_process
+def get_or_create_tmp_dir():
+    """
+    Get or create a temporary directory which will be removed once python process exit.
+    """
+    from mlflow.utils.databricks_utils import is_in_databricks_runtime, get_repl_id
+
+    if is_in_databricks_runtime() and get_repl_id() is not None:
+        # Note: For python process attached to databricks notebook, atexit does not work.
+        # The /tmp/repl_tmp_data/{repl_id} directory will be removed once databricks notebook
+        # detaches.
+        # The repl_tmp_data directory is designed to be used by all kinds of applications,
+        # so create a child directory "mlflow" for storing mlflow temp data.
+        tmp_dir = os.path.join("/tmp", "repl_tmp_data", get_repl_id(), "mlflow")
+        os.makedirs(tmp_dir, exist_ok=True)
+    else:
+        tmp_dir = tempfile.mkdtemp()
+        # mkdtemp creates a directory with permission 0o700
+        # change it to be 0o777 to ensure it can be seen in spark UDF
+        os.chmod(tmp_dir, 0o777)
+        atexit.register(shutil.rmtree, tmp_dir, ignore_errors=True)
+
+    return tmp_dir
+
+
+@cache_return_value_per_process
+def get_or_create_nfs_tmp_dir():
+    """
+    Get or create a temporary NFS directory which will be removed once python process exit.
+    """
+    from mlflow.utils.databricks_utils import is_in_databricks_runtime, get_repl_id
+    from mlflow.utils.nfs_on_spark import get_nfs_cache_root_dir
+
+    nfs_root_dir = get_nfs_cache_root_dir()
+
+    if is_in_databricks_runtime() and get_repl_id() is not None:
+        # Note: In databricks, atexit hook does not work.
+        # The {nfs_root_dir}/repl_tmp_data/{repl_id} directory will be removed once databricks
+        # notebook detaches.
+        # The repl_tmp_data directory is designed to be used by all kinds of applications,
+        # so create a child directory "mlflow" for storing mlflow temp data.
+        tmp_nfs_dir = os.path.join(nfs_root_dir, "repl_tmp_data", get_repl_id(), "mlflow")
+        os.makedirs(tmp_nfs_dir, exist_ok=True)
+    else:
+        tmp_nfs_dir = tempfile.mkdtemp(dir=nfs_root_dir)
+        # mkdtemp creates a directory with permission 0o700
+        # change it to be 0o777 to ensure it can be seen in spark UDF
+        os.chmod(tmp_nfs_dir, 0o777)
+        atexit.register(shutil.rmtree, tmp_nfs_dir, ignore_errors=True)
+
+    return tmp_nfs_dir

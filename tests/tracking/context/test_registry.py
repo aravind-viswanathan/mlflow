@@ -3,6 +3,7 @@ from unittest import mock
 import pytest
 
 import mlflow.tracking.context.registry
+from mlflow.tracking.context.databricks_repo_context import DatabricksRepoRunContext
 from mlflow.tracking.context.default_context import DefaultRunContext
 from mlflow.tracking.context.git_context import GitRunContext
 from mlflow.tracking.context.databricks_notebook_context import DatabricksNotebookRunContext
@@ -69,12 +70,13 @@ def test_registry_instance_defaults():
         GitRunContext,
         DatabricksNotebookRunContext,
         DatabricksJobRunContext,
+        DatabricksRepoRunContext,
     }
     assert expected_classes.issubset(_currently_registered_run_context_provider_classes())
 
 
 def test_registry_instance_loads_entrypoints():
-    class MockRunContext(object):
+    class MockRunContext:
         pass
 
     mock_entrypoint = mock.Mock()

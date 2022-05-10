@@ -7,27 +7,28 @@ import { ExperimentPage, isNewRun, lifecycleFilterToRunViewType } from './Experi
 import { ExperimentPagePersistedState } from '../sdk/MlflowLocalStorageMessages';
 import Utils from '../../common/utils/Utils';
 import ExperimentView from './ExperimentView';
-import { PermissionDeniedView } from './PermissionDeniedView';
 import { ViewType } from '../sdk/MlflowEnums';
-import { ErrorWrapper, getUUID } from '../../common/utils/ActionUtils';
+import { getUUID } from '../../common/utils/ActionUtils';
+import { ErrorWrapper } from '../../common/utils/ErrorWrapper';
 import { MAX_RUNS_IN_SEARCH_MODEL_VERSIONS_FILTER } from '../../model-registry/constants';
 import {
   ATTRIBUTE_COLUMN_SORT_KEY,
-  DETECT_NEW_RUNS_INTERVAL,
-  MAX_DETECT_NEW_RUNS_RESULTS,
-  PAGINATION_DEFAULT_STATE,
-  DEFAULT_ORDER_BY_KEY,
-  DEFAULT_ORDER_BY_ASC,
-  DEFAULT_START_TIME,
+  COLUMN_TYPES,
+  DEFAULT_CATEGORIZED_UNCHECKED_KEYS,
+  DEFAULT_DIFF_SWITCH_SELECTED,
   DEFAULT_LIFECYCLE_FILTER,
   DEFAULT_MODEL_VERSION_FILTER,
-  MODEL_VERSION_FILTER,
-  DEFAULT_CATEGORIZED_UNCHECKED_KEYS,
+  DEFAULT_ORDER_BY_ASC,
+  DEFAULT_ORDER_BY_KEY,
   DEFAULT_SHOW_MULTI_COLUMNS,
-  DEFAULT_DIFF_SWITCH_SELECTED,
-  COLUMN_TYPES,
+  DEFAULT_START_TIME,
   LIFECYCLE_FILTER,
+  MAX_DETECT_NEW_RUNS_RESULTS,
+  MODEL_VERSION_FILTER,
+  PAGINATION_DEFAULT_STATE,
+  POLL_INTERVAL,
 } from '../constants';
+import Fixtures from '../utils/test-utils/Fixtures';
 
 const EXPERIMENT_ID = '17';
 const BASE_PATH = '/experiments/17/s';
@@ -40,10 +41,13 @@ let batchGetExperimentsApi;
 let loadMoreRunsApi;
 let searchModelVersionsApi;
 let searchForNewRuns;
+let setCompareExperiments;
 let history;
 let location;
+let dateNowSpy;
 
 beforeEach(() => {
+  dateNowSpy = jest.spyOn(Date, 'now').mockImplementation(() => 0);
   localStorage.clear();
   searchRunsApi = jest.fn(() => Promise.resolve());
   getExperimentApi = jest.fn(() => Promise.resolve());
@@ -51,6 +55,7 @@ beforeEach(() => {
   searchModelVersionsApi = jest.fn(() => Promise.resolve());
   loadMoreRunsApi = jest.fn(() => Promise.resolve());
   searchForNewRuns = jest.fn(() => Promise.resolve());
+  setCompareExperiments = jest.fn(() => {});
   location = {
     pathname: '/',
   };
@@ -63,18 +68,25 @@ beforeEach(() => {
   };
 });
 
+afterAll(() => {
+  dateNowSpy.mockRestore();
+});
+
 const getExperimentPageMock = (additionalProps) => {
   return shallow(
     <ExperimentPage
-      experimentId={EXPERIMENT_ID}
+      experiments={[Fixtures.createExperiment({ experiment_id: EXPERIMENT_ID })]}
+      experimentIds={[EXPERIMENT_ID]}
       searchRunsApi={searchRunsApi}
       getExperimentApi={getExperimentApi}
       batchGetExperimentsApi={batchGetExperimentsApi}
       searchModelVersionsApi={searchModelVersionsApi}
       loadMoreRunsApi={loadMoreRunsApi}
       searchForNewRuns={searchForNewRuns}
+      setCompareExperiments={setCompareExperiments}
       history={history}
       location={location}
+      intl={{ formatMessage: () => {} }}
       {...additionalProps}
     />,
   );
@@ -242,49 +254,50 @@ test('onClear clears all parameters', () => {
 test('should render permission denied view when getExperiment yields permission error', () => {
   const experimentPageInstance = getExperimentPageMock().instance();
   experimentPageInstance.setState({
-    getExperimentRequestId: getUUID(),
+    getExperimentRequestIds: [getUUID()],
     searchRunsRequestId: getUUID(),
   });
   const errorMessage = 'Access Denied';
-  const responseErrorWrapper = new ErrorWrapper({
-    responseText: `{"error_code": "${ErrorCodes.PERMISSION_DENIED}", "message": "${errorMessage}"}`,
-  });
+  const responseErrorWrapper = new ErrorWrapper(
+    `{"error_code": "${ErrorCodes.PERMISSION_DENIED}", "message": "${errorMessage}"}`,
+    403,
+  );
   const searchRunsErrorRequest = {
     id: experimentPageInstance.state.searchRunsRequestId,
     active: false,
     error: responseErrorWrapper,
   };
   const getExperimentErrorRequest = {
-    id: experimentPageInstance.state.getExperimentRequestId,
+    id: experimentPageInstance.state.getExperimentRequestIds[0],
     active: false,
     error: responseErrorWrapper,
   };
-  const experimentViewInstance = shallow(
+  const wrapper = shallow(
     experimentPageInstance.renderExperimentView(false, true, [
       searchRunsErrorRequest,
       getExperimentErrorRequest,
     ]),
-  ).instance();
-  expect(experimentViewInstance).toBeInstanceOf(PermissionDeniedView);
-  expect(experimentViewInstance.props.errorMessage).toEqual(errorMessage);
+  );
+  expect(wrapper.find('[data-testid="error-message"]').text()).toEqual(errorMessage);
 });
 
 test('should render experiment view when search error occurs', () => {
   const experimentPageInstance = getExperimentPageMock().instance();
   experimentPageInstance.setState({
-    getExperimentRequestId: getUUID(),
+    getExperimentRequestIds: [getUUID()],
     searchRunsRequestId: getUUID(),
   });
-  const responseErrorWrapper = new ErrorWrapper({
-    responseText: `{"error_code": "${ErrorCodes.INVALID_PARAMETER_VALUE}", "message": "Invalid"}`,
-  });
+  const responseErrorWrapper = new ErrorWrapper(
+    `{"error_code": "${ErrorCodes.INVALID_PARAMETER_VALUE}", "message": "Invalid"}`,
+    400,
+  );
   const searchRunsErrorRequest = {
     id: experimentPageInstance.state.searchRunsRequestId,
     active: false,
     error: responseErrorWrapper,
   };
   const getExperimentErrorRequest = {
-    id: experimentPageInstance.state.getExperimentRequestId,
+    id: experimentPageInstance.state.getExperimentRequestIds[0],
     active: false,
   };
   const renderedView = shallow(
@@ -329,7 +342,7 @@ test('should update next page token to null when load-more response has no token
 });
 
 test('should set state to default values on promise rejection when loading more', () => {
-  loadMoreRunsApi = jest.fn(() => Promise.reject());
+  loadMoreRunsApi = jest.fn(() => Promise.reject(new Error('loadMoreRuns rejected')));
   const wrapper = getExperimentPageMock();
   const instance = wrapper.instance();
   return Promise.resolve(instance.handleLoadMoreRuns()).then(() => {
@@ -342,7 +355,7 @@ test('should set state to default values on promise rejection when loading more'
 });
 
 test('should set state to default values on promise rejection onSearch', () => {
-  searchRunsApi = jest.fn(() => Promise.reject());
+  searchRunsApi = jest.fn(() => Promise.reject(new Error('searchRuns rejected')));
   const wrapper = getExperimentPageMock();
   const instance = wrapper.instance();
   return Promise.resolve(instance.onSearch({})).then(() => {
@@ -584,80 +597,94 @@ test('lifecycleFilterToRunViewType', () => {
   expect(lifecycleFilterToRunViewType('Deleted')).toBe('DELETED_ONLY');
 });
 
-describe('detectNewRuns', () => {
-  describe('refresh behaviour', () => {
-    test('Should refresh once after DETECT_NEW_RUNS_INTERVAL', () => {
-      getExperimentPageMock();
-      jest.advanceTimersByTime(DETECT_NEW_RUNS_INTERVAL - 1);
-      expect(searchForNewRuns).toHaveBeenCalledTimes(0);
-      jest.advanceTimersByTime(1);
-      expect(searchForNewRuns).toHaveBeenCalledTimes(1);
+describe('pollInfo', () => {
+  test('Should be called every POLL_INTERVAL', () => {
+    const instance = getExperimentPageMock().instance();
+    instance.pollInfo = jest.fn();
+
+    jest.advanceTimersByTime(POLL_INTERVAL - 1);
+    expect(instance.pollInfo).toHaveBeenCalledTimes(0);
+    jest.advanceTimersByTime(1);
+    expect(instance.pollInfo).toHaveBeenCalledTimes(1);
+    jest.advanceTimersByTime(POLL_INTERVAL);
+    expect(instance.pollInfo).toHaveBeenCalledTimes(2);
+  });
+
+  test('Should not be called after unmount', async () => {
+    const wrapper = getExperimentPageMock();
+    const instance = wrapper.instance();
+    instance.pollInfo = jest.fn();
+    await instance.pollInfo();
+
+    wrapper.unmount();
+    jest.advanceTimersByTime(POLL_INTERVAL);
+    expect(instance.pollInfo).toHaveBeenCalledTimes(1);
+    jest.advanceTimersByTime(POLL_INTERVAL);
+    expect(instance.pollInfo).toHaveBeenCalledTimes(1);
+    jest.advanceTimersByTime(POLL_INTERVAL * 100);
+    expect(instance.pollInfo).toHaveBeenCalledTimes(1);
+  });
+
+  test('pollNewRuns is called if newRuns is true', async () => {
+    const instance = getExperimentPageMock().instance();
+    instance.pollNewRuns = jest.fn();
+
+    expect(instance.state.pollingState.newRuns).toEqual(true);
+    await instance.pollInfo();
+    expect(instance.pollNewRuns).toHaveBeenCalledTimes(1);
+  });
+
+  test('pollNewRuns is not called if newRuns is false', () => {
+    const instance = getExperimentPageMock().instance();
+    instance.pollNewRuns = jest.fn();
+
+    instance.setState(
+      {
+        pollingState: {
+          newRuns: false,
+        },
+      },
+      async () => {
+        await instance.pollInfo();
+        expect(instance.pollNewRuns).toHaveBeenCalledTimes(0);
+      },
+    );
+  });
+});
+
+describe('pollNewRuns', () => {
+  describe('newRuns state', () => {
+    const maxNewRuns = [];
+    for (let i = 0; i < MAX_DETECT_NEW_RUNS_RESULTS; i++) {
+      maxNewRuns.push({ info: { start_time: Date.now() + 10000 } });
+    }
+
+    test('Should set pollingState.newRuns to false if there are already max new runs', async () => {
+      const mockSearchForNewRuns = jest.fn(() => Promise.resolve({ runs: maxNewRuns }));
+      const instance = getExperimentPageMock({
+        searchForNewRuns: mockSearchForNewRuns,
+      }).instance();
+
+      expect(mockSearchForNewRuns).toHaveBeenCalledTimes(0);
+      await instance.pollNewRuns();
+      expect(mockSearchForNewRuns).toHaveBeenCalledTimes(1);
+      expect(instance.state.pollingState.newRuns).toEqual(false);
+      jest.advanceTimersByTime(POLL_INTERVAL * 100);
+      expect(mockSearchForNewRuns).toHaveBeenCalledTimes(1);
     });
 
-    test('Should refresh every DETECT_NEW_RUNS_INTERVAL', () => {
-      getExperimentPageMock();
-      jest.advanceTimersByTime(DETECT_NEW_RUNS_INTERVAL - 1);
-      expect(searchForNewRuns).toHaveBeenCalledTimes(0);
-      jest.advanceTimersByTime(1);
-      expect(searchForNewRuns).toHaveBeenCalledTimes(1);
-      jest.advanceTimersByTime(DETECT_NEW_RUNS_INTERVAL);
-      expect(searchForNewRuns).toHaveBeenCalledTimes(2);
-    });
+    test('Should set pollingState.newRuns to true if a new search is triggered', async () => {
+      const mockSearchForNewRuns = jest.fn(() => Promise.resolve({ runs: maxNewRuns }));
+      const instance = getExperimentPageMock({
+        searchForNewRuns: mockSearchForNewRuns,
+      }).instance();
 
-    test('Should not keep refreshing after unmount', () => {
-      const mock = getExperimentPageMock();
+      await instance.pollNewRuns();
+      expect(mockSearchForNewRuns).toHaveBeenCalledTimes(1);
+      expect(instance.state.pollingState.newRuns).toEqual(false);
 
-      mock.unmount();
-
-      jest.advanceTimersByTime(DETECT_NEW_RUNS_INTERVAL);
-      expect(searchForNewRuns).toHaveBeenCalledTimes(0);
-      jest.advanceTimersByTime(DETECT_NEW_RUNS_INTERVAL);
-      expect(searchForNewRuns).toHaveBeenCalledTimes(0);
-      jest.advanceTimersByTime(DETECT_NEW_RUNS_INTERVAL * 100);
-      expect(searchForNewRuns).toHaveBeenCalledTimes(0);
-    });
-
-    describe('Interval clearing behaviour', () => {
-      const maxNewRuns = [];
-      for (let i = 0; i < MAX_DETECT_NEW_RUNS_RESULTS; i++) {
-        maxNewRuns.push({ info: { start_time: Date.now() + 10000 } });
-      }
-
-      test('Should stop polling if there are already max new runs', async () => {
-        const mockSearchForNewRuns = jest.fn(() => Promise.resolve({ runs: maxNewRuns }));
-
-        const instance = getExperimentPageMock({
-          searchForNewRuns: mockSearchForNewRuns,
-        }).instance();
-
-        expect(mockSearchForNewRuns).toHaveBeenCalledTimes(0);
-        await instance.detectNewRuns();
-        expect(mockSearchForNewRuns).toHaveBeenCalledTimes(1);
-        expect(instance.detectNewRunsTimer).toEqual(null);
-        jest.advanceTimersByTime(DETECT_NEW_RUNS_INTERVAL * 100);
-        expect(mockSearchForNewRuns).toHaveBeenCalledTimes(1);
-      });
-
-      test('Should resume polling if a new search is triggered', async () => {
-        const mockSearchForNewRuns = jest.fn(() => Promise.resolve({ runs: maxNewRuns }));
-
-        const instance = getExperimentPageMock({
-          searchForNewRuns: mockSearchForNewRuns,
-        }).instance();
-
-        await instance.detectNewRuns();
-        expect(mockSearchForNewRuns).toHaveBeenCalledTimes(1);
-        expect(instance.detectNewRunsTimer).toEqual(null);
-        jest.advanceTimersByTime(DETECT_NEW_RUNS_INTERVAL * 100);
-        expect(mockSearchForNewRuns).toHaveBeenCalledTimes(1);
-
-        await instance.onSearch({});
-
-        jest.advanceTimersByTime(DETECT_NEW_RUNS_INTERVAL);
-        expect(mockSearchForNewRuns).toHaveBeenCalledTimes(2);
-        jest.advanceTimersByTime(DETECT_NEW_RUNS_INTERVAL);
-        expect(mockSearchForNewRuns).toHaveBeenCalledTimes(3);
-      });
+      await instance.onSearch();
+      expect(instance.state.pollingState.newRuns).toEqual(true);
     });
   });
 
@@ -672,7 +699,7 @@ describe('detectNewRuns', () => {
         searchForNewRuns: () => Promise.resolve({ runs: [] }),
       }).instance();
 
-      await instance.detectNewRuns();
+      await instance.pollNewRuns();
       expect(instance.state.numberOfNewRuns).toEqual(0);
     });
 
@@ -703,14 +730,14 @@ describe('detectNewRuns', () => {
         searchForNewRuns: mockSearchForNewRuns,
       }).instance();
 
-      await instance.detectNewRuns();
+      await instance.pollNewRuns();
       expect(instance.state.numberOfNewRuns).toEqual(2);
     });
 
     test('Should not explode if no runs', async () => {
       const instance = getExperimentPageMock().instance();
 
-      await instance.detectNewRuns();
+      await instance.pollNewRuns();
       expect(instance.state.numberOfNewRuns).toEqual(0);
     });
   });
