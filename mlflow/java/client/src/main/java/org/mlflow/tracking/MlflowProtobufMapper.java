@@ -134,8 +134,8 @@ class MlflowProtobufMapper {
             }
             return builder.build().toString();
         } catch (URISyntaxException e) {
-            throw new MlflowClientException("Failed to construct request URI for get latest versions.",
-                    e);
+            throw new MlflowClientException("Failed to construct request URI for get latest " +
+                    "versions.", e);
         }
     }
 
@@ -237,18 +237,27 @@ class MlflowProtobufMapper {
         return builder.getArtifactUri();
     }
 
-    String makeSearchRegisteredModels(String filter, int maxResults, List<String> orderBy, String pageToken) {
-        return getBuilderWithSearchParams("registered-models/search", filter, maxResults, orderBy, pageToken).toString();
+    String makeSearchRegisteredModels(String filter,
+                                      int maxResults,
+                                      List<String> orderBy,
+                                      String pageToken) {
+        return getBuilderWithSearchParams("registered-models/search", filter, maxResults, orderBy,
+                pageToken).toString();
     }
 
     SearchRegisteredModels.Response toSearchRegisteredModelsResponse(String json) {
-        SearchRegisteredModels.Response.Builder builder = SearchRegisteredModels.Response.newBuilder();
+        SearchRegisteredModels.Response.Builder builder =
+                SearchRegisteredModels.Response.newBuilder();
         merge(json, builder);
         return builder.build();
     }
 
-    String makeSearchModelVersions(String filter, int maxResults, List<String> orderBy, String pageToken) {
-        return getBuilderWithSearchParams("model-versions/search",filter, maxResults, orderBy, pageToken).toString();
+    String makeSearchModelVersions(String filter,
+                                   int maxResults,
+                                   List<String> orderBy,
+                                   String pageToken) {
+        return getBuilderWithSearchParams("model-versions/search",filter, maxResults, orderBy,
+                pageToken).toString();
     }
 
     SearchModelVersions.Response toSearchModelVersionsResponse(String json){
@@ -269,11 +278,16 @@ class MlflowProtobufMapper {
         try {
             JsonFormat.parser().ignoringUnknownFields().merge(json, builder);
         } catch (InvalidProtocolBufferException e) {
-            throw new MlflowClientException("Failed to serialize json " + json + " into " + builder, e);
+            throw new MlflowClientException("Failed to serialize json " + json + " into " +
+                    builder, e);
         }
     }
 
-    private URIBuilder getBuilderWithSearchParams(String searchURL, String filter, int maxResults, List<String> orderByList, String pageToken) {
+    private URIBuilder getBuilderWithSearchParams(String searchURL,
+                                                  String filter,
+                                                  int maxResults,
+                                                  List<String> orderByList,
+                                                  String pageToken) {
         try {
             URIBuilder builder = new URIBuilder(searchURL);
             if (!Strings.isNullOrEmpty(filter)) {
@@ -281,12 +295,12 @@ class MlflowProtobufMapper {
             }
 
             if (!Strings.isNullOrEmpty(pageToken)) {
-                builder.addParameter("pageToken", pageToken);
+                builder.addParameter("page_token", pageToken);
             }
-            builder.addParameter("maxResults", String.valueOf(maxResults));
+            builder.addParameter("max_results", String.valueOf(maxResults));
 
             for(String order: orderByList) {
-                builder.addParameter("orderBy", order);
+                builder.addParameter("order_by", order);
             }
             return builder;
         } catch (URISyntaxException e) {

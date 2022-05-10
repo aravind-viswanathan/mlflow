@@ -1,6 +1,6 @@
 package org.mlflow.tracking.modelregistry;
 
-import jdk.internal.joptsimple.internal.Strings;
+import com.google.common.base.Strings;
 import org.mlflow.api.proto.ModelRegistry;
 import org.mlflow.tracking.EmptyPage;
 import org.mlflow.tracking.MlflowClient;
@@ -19,7 +19,11 @@ public class RegisteredModelsPage implements Page<ModelRegistry.RegisteredModel>
     private final int maxResults;
     private final MlflowClient client;
 
-    public RegisteredModelsPage(String token, List<ModelRegistry.RegisteredModel> registeredModels, String searchFilter, List<String> orderBy, int maxResults, MlflowClient client) {
+    public RegisteredModelsPage(String token,
+                                List<ModelRegistry.RegisteredModel> registeredModels,
+                                String searchFilter, List<String> orderBy,
+                                int maxResults,
+                                MlflowClient client) {
         this.token = token;
         this.registeredModels = registeredModels;
         this.searchFilter = searchFilter;
@@ -36,7 +40,7 @@ public class RegisteredModelsPage implements Page<ModelRegistry.RegisteredModel>
 
     @Override
     public boolean hasNextPage() {
-         return Strings.isNullOrEmpty(token);
+         return !Strings.isNullOrEmpty(token);
     }
 
     @Override

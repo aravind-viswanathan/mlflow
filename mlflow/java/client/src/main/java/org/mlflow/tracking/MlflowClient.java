@@ -751,11 +751,10 @@ public class MlflowClient implements Serializable {
    */
   public File downloadModelVersion(String modelName, String version) {
     String path = modelName + "/" + version;
-    URIBuilder downloadUriBuilder = new URIBuilder()
-            .setScheme(DEFAULT_MODELS_ARTIFACT_REPOSITORY_SCHEME).setPath(path);
+    String downloadUri = DEFAULT_MODELS_ARTIFACT_REPOSITORY_SCHEME+":/"+path;
     CliBasedArtifactRepository repository = new CliBasedArtifactRepository(null, null,
             hostCredsProvider);
-    return repository.downloadArtifactFromUri(downloadUriBuilder.toString());
+    return repository.downloadArtifactFromUri(downloadUri);
   }
 
   /**
@@ -789,15 +788,21 @@ public class MlflowClient implements Serializable {
    * Returns all the registered models matching the search query.
    * @param searchFilter String filter condition.
    * @param maxResults Maximum number of models desired.
-   * @param orderBy List of columns for ordering search results with an optional DESC or ASC annotation, wherein ASC is default.
+   * @param orderBy List of columns for ordering search results with an optional DESC or
+   *                ASC annotation, wherein ASC is default.
    * @param pageToken Pagination token to go to the next page based on the previous search query.
    * @return A RegisteredModelsPage {@link org.mlflow.tracking.modelregistry.RegisteredModelsPage}
    */
 
-  public RegisteredModelsPage searchRegisteredModels(String searchFilter, int maxResults, List<String> orderBy, String pageToken){
-    String json = sendGet(mapper.makeSearchRegisteredModels(searchFilter, maxResults, orderBy, pageToken));
+  public RegisteredModelsPage searchRegisteredModels(String searchFilter,
+                                                     int maxResults,
+                                                     List<String> orderBy,
+                                                     String pageToken){
+    String json = sendGet(mapper.makeSearchRegisteredModels(searchFilter, maxResults, orderBy,
+            pageToken));
     SearchRegisteredModels.Response response = mapper.toSearchRegisteredModelsResponse(json);
-    return new RegisteredModelsPage(response.getNextPageToken(), response.getRegisteredModelsList(), searchFilter, orderBy, maxResults, this);
+    return new RegisteredModelsPage(response.getNextPageToken(),
+            response.getRegisteredModelsList(), searchFilter, orderBy, maxResults, this);
   }
 
 
@@ -805,14 +810,20 @@ public class MlflowClient implements Serializable {
    * Returns all the registered models matching the search query.
    * @param searchFilter String filter condition.
    * @param maxResults Maximum number of models desired.
-   * @param orderBy List of columns for ordering search results with an optional DESC or ASC annotation, wherein ASC is default.
+   * @param orderBy List of columns for ordering search results with an optional DESC or
+   *                ASC annotation, wherein ASC is default.
    * @param pageToken Pagination token to go to the next page based on the previous search query.
    * @return A ModelVersionsPage {@link org.mlflow.tracking.modelregistry.ModelVersionsPage}
    */
-  public ModelVersionsPage searchModelVersions(String searchFilter, int maxResults, List<String> orderBy, String pageToken){
-    String json = sendGet(mapper.makeSearchModelVersions(searchFilter, maxResults, orderBy, pageToken));
+  public ModelVersionsPage searchModelVersions(String searchFilter,
+                                               int maxResults,
+                                               List<String> orderBy,
+                                               String pageToken){
+    String json = sendGet(mapper.makeSearchModelVersions(searchFilter, maxResults, orderBy,
+            pageToken));
     SearchModelVersions.Response response = mapper.toSearchModelVersionsResponse(json);
-    return new ModelVersionsPage(response.getNextPageToken(), response.getModelVersionsList(), searchFilter, orderBy, maxResults, this);
+    return new ModelVersionsPage(response.getNextPageToken(), response.getModelVersionsList(),
+            searchFilter, orderBy, maxResults, this);
   }
 
 }
