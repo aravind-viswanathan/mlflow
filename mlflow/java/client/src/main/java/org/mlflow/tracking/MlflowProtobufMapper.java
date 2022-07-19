@@ -134,8 +134,8 @@ class MlflowProtobufMapper {
             }
             return builder.build().toString();
         } catch (URISyntaxException e) {
-            throw new MlflowClientException("Failed to construct request URI for get latest " +
-                    "versions.", e);
+            throw new MlflowClientException("Failed to construct request URI for get " +
+                    "latest versions.", e);
         }
     }
 
@@ -241,13 +241,13 @@ class MlflowProtobufMapper {
                                       int maxResults,
                                       List<String> orderBy,
                                       String pageToken) {
-        return getBuilderWithSearchParams("registered-models/search", filter, maxResults, orderBy,
-                pageToken).toString();
+        return getBuilderWithSearchParams("registered-models/search", filter,
+                maxResults, orderBy, pageToken).toString();
     }
 
     SearchRegisteredModels.Response toSearchRegisteredModelsResponse(String json) {
-        SearchRegisteredModels.Response.Builder builder =
-                SearchRegisteredModels.Response.newBuilder();
+        SearchRegisteredModels.Response.Builder builder = SearchRegisteredModels.Response
+                .newBuilder();
         merge(json, builder);
         return builder.build();
     }
@@ -256,8 +256,8 @@ class MlflowProtobufMapper {
                                    int maxResults,
                                    List<String> orderBy,
                                    String pageToken) {
-        return getBuilderWithSearchParams("model-versions/search",filter, maxResults, orderBy,
-                pageToken).toString();
+        return getBuilderWithSearchParams("model-versions/search",filter,
+                maxResults, orderBy, pageToken).toString();
     }
 
     SearchModelVersions.Response toSearchModelVersionsResponse(String json){
@@ -278,8 +278,8 @@ class MlflowProtobufMapper {
         try {
             JsonFormat.parser().ignoringUnknownFields().merge(json, builder);
         } catch (InvalidProtocolBufferException e) {
-            throw new MlflowClientException("Failed to serialize json " + json + " into " +
-                    builder, e);
+            throw new MlflowClientException("Failed to serialize json " + json + " into "
+                    + builder, e);
         }
     }
 

@@ -36,17 +36,17 @@ public class ModelVersionsPage implements Page<ModelRegistry.ModelVersion> {
 
     @Override
     public int getPageSize() {
-        return this.modelVersions.size();
+        return modelVersions.size();
     }
 
     @Override
     public boolean hasNextPage() {
-        return !Strings.isNullOrEmpty(token);
+        return Strings.isNullOrEmpty(token);
     }
 
     @Override
     public Optional<String> getNextPageToken() {
-        if(hasNextPage()){
+        if (hasNextPage()){
             return Optional.of(token);
         }
         return Optional.empty();
@@ -67,6 +67,6 @@ public class ModelVersionsPage implements Page<ModelRegistry.ModelVersion> {
 
     @Override
     public Iterable<ModelRegistry.ModelVersion> getItems() {
-        return this.modelVersions;
+        return modelVersions;
     }
 }

@@ -21,7 +21,8 @@ public class RegisteredModelsPage implements Page<ModelRegistry.RegisteredModel>
 
     public RegisteredModelsPage(String token,
                                 List<ModelRegistry.RegisteredModel> registeredModels,
-                                String searchFilter, List<String> orderBy,
+                                String searchFilter,
+                                List<String> orderBy,
                                 int maxResults,
                                 MlflowClient client) {
         this.token = token;
