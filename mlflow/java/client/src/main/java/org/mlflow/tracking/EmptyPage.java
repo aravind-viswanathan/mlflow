@@ -8,7 +8,7 @@ public class EmptyPage<E> implements Page<E> {
   /**
    * Creates an empty page
    */
-  EmptyPage() {}
+  public EmptyPage() {}
 
   /**
    * @return Zero

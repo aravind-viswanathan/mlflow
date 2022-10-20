@@ -8,6 +8,8 @@ import org.mlflow.artifacts.CliBasedArtifactRepository;
 import org.mlflow.api.proto.ModelRegistry.*;
 import org.mlflow.api.proto.Service.*;
 import org.mlflow.tracking.creds.*;
+import org.mlflow.tracking.modelregistry.ModelVersionsPage;
+import org.mlflow.tracking.modelregistry.RegisteredModelsPage;
 
 import java.io.Closeable;
 import java.io.File;
@@ -880,6 +882,48 @@ public class MlflowClient implements Serializable, Closeable {
 
       ModelVersion details = versions.get(0);
       return downloadModelVersion(modelName, details.getVersion());
+  }
+
+  /**
+   * Returns all the registered models matching the search query.
+   * @param searchFilter String filter condition.
+   * @param maxResults Maximum number of models desired.
+   * @param orderBy List of columns for ordering search results with an optional
+   *               DESC or ASC annotation, wherein ASC is default.
+   * @param pageToken Pagination token to go to the next page based on the previous search query.
+   * @return A RegisteredModelsPage {@link org.mlflow.tracking.modelregistry.RegisteredModelsPage}
+   */
+
+  public RegisteredModelsPage searchRegisteredModels(String searchFilter,
+                                                     int maxResults,
+                                                     List<String> orderBy,
+                                                     String pageToken){
+    String json = sendGet(mapper.makeSearchRegisteredModels(searchFilter,
+                          maxResults, orderBy, pageToken));
+    SearchRegisteredModels.Response response = mapper.toSearchRegisteredModelsResponse(json);
+    return new RegisteredModelsPage(response.getNextPageToken(), response.getRegisteredModelsList(),
+                                    searchFilter, orderBy, maxResults, this);
+  }
+
+
+  /**
+   * Returns all the registered models matching the search query.
+   * @param searchFilter String filter condition.
+   * @param maxResults Maximum number of models desired.
+   * @param orderBy List of columns for ordering search results with an optional
+   *                DESC or ASC annotation, wherein ASC is default.
+   * @param pageToken Pagination token to go to the next page based on the previous search query.
+   * @return A ModelVersionsPage {@link org.mlflow.tracking.modelregistry.ModelVersionsPage}
+   */
+  public ModelVersionsPage searchModelVersions(String searchFilter,
+                                               int maxResults,
+                                               List<String> orderBy,
+                                               String pageToken){
+    String json = sendGet(mapper.makeSearchModelVersions(searchFilter, maxResults,
+                            orderBy, pageToken));
+    SearchModelVersions.Response response = mapper.toSearchModelVersionsResponse(json);
+    return new ModelVersionsPage(response.getNextPageToken(), response.getModelVersionsList(),
+                                  searchFilter, orderBy, maxResults, this);
   }
 
   /**
