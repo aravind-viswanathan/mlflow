@@ -3,7 +3,7 @@
   <parent>
     <artifactId>mlflow-parent</artifactId>
     <groupId>org.mlflow</groupId>
-    <version>1.22.1-SNAPSHOT</version>
+    <version>1.29.1-SNAPSHOT</version>
   </parent>
   <modelVersion>4.0.0</modelVersion>
   <artifactId>mlflow-client</artifactId>
@@ -109,16 +109,6 @@
       <artifactId>testng</artifactId>
       <version>6.14.3</version>
       <scope>test</scope>
-      <exclusions>
-        <exclusion>
-          <artifactId>jcommander</artifactId>
-          <groupId>com.beust</groupId>
-        </exclusion>
-        <exclusion>
-          <artifactId>bsh</artifactId>
-          <groupId>org.apache-extras.beanshell</groupId>
-        </exclusion>
-      </exclusions>
     </dependency>
     <dependency>
       <groupId>org.slf4j</groupId>
@@ -131,20 +121,6 @@
       <artifactId>mockito-core</artifactId>
       <version>2.28.2</version>
       <scope>test</scope>
-      <exclusions>
-        <exclusion>
-          <artifactId>byte-buddy</artifactId>
-          <groupId>net.bytebuddy</groupId>
-        </exclusion>
-        <exclusion>
-          <artifactId>byte-buddy-agent</artifactId>
-          <groupId>net.bytebuddy</groupId>
-        </exclusion>
-        <exclusion>
-          <artifactId>objenesis</artifactId>
-          <groupId>org.objenesis</groupId>
-        </exclusion>
-      </exclusions>
     </dependency>
   </dependencies>
   <properties>
